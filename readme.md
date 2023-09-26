@@ -1,4 +1,5 @@
 A simple script for removing video watermark, using Lama Cleaner.  
+Made this to use myself, but as it seems to work okay, I upload this.  
 Only tested at NVIDIA windows environment.
 
 Instructions:
