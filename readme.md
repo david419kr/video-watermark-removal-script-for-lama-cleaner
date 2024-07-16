@@ -13,7 +13,7 @@ If not working, pls check requirements below.
 
 -- Requirements --
 
-> Lama Cleaner must be running at 8080 port. https://github.com/Sanster/lama-cleaner
+> Lama Cleaner must be running at 8080 port. Seems my script does not work with iopaint(new version of lama-cleaner?), please install a forked old version of lama-cleaner.(just "pip install lama-cleaner" will work) https://github.com/david419kr/lama-cleaner
 
 > Python3 must be installed. (Maybe you will automatically satisfy this requirement if you're running Lama Cleaner)
 
