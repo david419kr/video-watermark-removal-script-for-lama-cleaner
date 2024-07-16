@@ -1,3 +1,9 @@
+Update(2024):  
+Seems my script does not work with iopaint(new version of lama-cleaner),  
+please install a forked old version of lama-cleaner. https://github.com/david419kr/lama-cleaner  
+(fortunately, "pip install lama-cleaner" still just works nice)  
+------
+
 A simple script for removing video watermark, using Lama Cleaner.  
 Made this to use myself, but as it seems to work okay, I upload this.  
 Only tested at NVIDIA windows environment.
@@ -13,7 +19,7 @@ If not working, pls check requirements below.
 
 -- Requirements --
 
-> Lama Cleaner must be running at 8080 port. Seems my script does not work with iopaint(new version of lama-cleaner?), please install a forked old version of lama-cleaner.(just "pip install lama-cleaner" will work) https://github.com/david419kr/lama-cleaner
+> Lama Cleaner must be running at 8080 port.
 
 > Python3 must be installed. (Maybe you will automatically satisfy this requirement if you're running Lama Cleaner)
 
