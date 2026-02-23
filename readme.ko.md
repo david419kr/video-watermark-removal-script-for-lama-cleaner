@@ -6,10 +6,10 @@
 
 현재 리포지토리는 GUI 중심이며, 기존 배치/PowerShell 파이프라인 방식은 사용하지 않습니다.
 
+<img width="1202" height="1070" alt="image" src="https://github.com/user-attachments/assets/819e5d1e-204e-4dec-a9ee-a75845707623" />
+
 ## 주요 기능
 
-- 네이티브 데스크톱 앱 (`PySide6`)
-- 비디오 드래그앤드롭 + 파일 선택 열기
 - 프레임 단위 타임라인 작업
   - 좌/우 방향키 프레임 이동
   - 길게 누르면 가속 이동
@@ -23,16 +23,12 @@
   - 마스크 활성 배지 + 빨간 오버레이
 - GUI에서 `lama-cleaner` 멀티 인스턴스 제어 (`8080`부터 순차 할당)
 - 처리 일시정지/재개 및 작업 상태 복구
-- ffmpeg GPU 가속 경로 지원 (CUDA/NVENC 사용, 실패 시 CPU fallback)
 
 ## 시스템 요구사항
 
 - Windows 10/11 (x64)
 - NVIDIA GPU + CUDA 사용 가능한 드라이버 (`--device=cuda` 사용)
 - 최초 설정 시 인터넷 연결 (Python/pip/패키지/모델 다운로드)
-- FFmpeg 바이너리 위치:
-  - `ffmpeg/bin/ffmpeg.exe`
-  - `ffmpeg/bin/ffprobe.exe`
 
 ## 빠른 시작
 
@@ -92,9 +88,6 @@ start_gui.bat
   - 진행 중인 요청을 안전하게 마무리
   - `workspace/paused_job.json`에 재개 정보 저장
   - 앱 재실행 시 자동 복구되고 `Resume Processing`으로 표시
-- 진행률 표기:
-  - 프레임 클리닝 단계는 최대 `99%`
-  - 머지/최종 저장까지 완료되면 `100%`
 
 ## 멀티 인스턴스 동작
 
