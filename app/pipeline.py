@@ -82,9 +82,10 @@ class VideoProcessingPipeline:
         video_info = get_video_info(self.paths.ffprobe, config.video_path)
         self.log(
             f"Video info: {video_info.width}x{video_info.height}, "
-            f"{video_info.fps:.3f} fps, {video_info.duration_sec:.2f}s"
+            f"{video_info.fps:.3f} fps, {video_info.duration_sec:.2f}s, "
+            f"{video_info.total_frames} frames"
         )
-        self._validate_segments(config.segments, video_info.duration_sec)
+        self._validate_segments(config.segments, video_info.total_frames)
 
         job_root = self._prepare_job_folder()
         input_dir = job_root / "input"
@@ -106,7 +107,6 @@ class VideoProcessingPipeline:
         masked_tasks, copied_count = self._prepare_tasks(
             frame_files=frame_files,
             output_dir=output_dir,
-            fps=video_info.fps,
             segments=config.segments,
         )
         self._update_progress_bulk(copied_count)
@@ -206,21 +206,19 @@ class VideoProcessingPipeline:
         self,
         frame_files: list[Path],
         output_dir: Path,
-        fps: float,
         segments: list[Segment],
     ) -> tuple[list[tuple[Path, Path, Path]], int]:
         masked_tasks: list[tuple[Path, Path, Path]] = []
         copied_count = 0
 
-        sorted_segments = sorted(segments, key=lambda seg: seg.start_sec)
+        sorted_segments = sorted(segments, key=lambda seg: seg.start_frame)
 
         for frame_path in frame_files:
             index = int(frame_path.stem) if frame_path.stem.isdigit() else None
             if index is None:
                 raise RuntimeError(f"Unexpected frame filename: {frame_path.name}")
 
-            time_sec = (index - 1) / fps
-            mask_path = self._mask_for_time(time_sec, sorted_segments)
+            mask_path = self._mask_for_frame(index, sorted_segments)
             output_path = output_dir / frame_path.name
 
             if mask_path is None:
@@ -232,9 +230,9 @@ class VideoProcessingPipeline:
         return masked_tasks, copied_count
 
     @staticmethod
-    def _mask_for_time(time_sec: float, segments: list[Segment]) -> Optional[Path]:
+    def _mask_for_frame(frame_index: int, segments: list[Segment]) -> Optional[Path]:
         for segment in segments:
-            if segment.start_sec <= time_sec < segment.end_sec:
+            if segment.start_frame <= frame_index <= segment.end_frame:
                 return segment.mask_path
         return None
 
@@ -456,23 +454,23 @@ class VideoProcessingPipeline:
         text = (result.stdout or "") + "\n" + (result.stderr or "")
         return "h264_nvenc" in text.lower()
 
-    def _validate_segments(self, segments: list[Segment], duration_sec: float) -> None:
-        ordered = sorted(segments, key=lambda seg: seg.start_sec)
+    def _validate_segments(self, segments: list[Segment], total_frames: int) -> None:
+        ordered = sorted(segments, key=lambda seg: seg.start_frame)
         for seg in ordered:
-            if seg.end_sec > duration_sec:
+            if seg.end_frame > total_frames:
                 raise ValueError(
-                    f"Segment exceeds video duration: start={seg.start_sec:.3f}, end={seg.end_sec:.3f}, "
-                    f"duration={duration_sec:.3f}"
+                    f"Segment exceeds video frame range: start={seg.start_frame}, end={seg.end_frame}, "
+                    f"max={total_frames}"
                 )
 
         for idx in range(1, len(ordered)):
             left = ordered[idx - 1]
             right = ordered[idx]
-            if left.end_sec > right.start_sec:
+            if left.end_frame >= right.start_frame:
                 raise ValueError(
                     f"Overlapping segments detected: "
-                    f"[{left.start_sec:.3f}, {left.end_sec:.3f}] overlaps "
-                    f"[{right.start_sec:.3f}, {right.end_sec:.3f}]"
+                    f"[{left.start_frame}, {left.end_frame}] overlaps "
+                    f"[{right.start_frame}, {right.end_frame}]"
                 )
 
     def _check_cancelled(self) -> None:

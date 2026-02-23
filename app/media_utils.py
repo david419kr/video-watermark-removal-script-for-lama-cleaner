@@ -46,6 +46,75 @@ def format_seconds(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
 
+def parse_time_text(value: str) -> float:
+    raw = value.strip()
+    if not raw:
+        raise ValueError("Empty time text.")
+
+    if ":" not in raw:
+        return float(raw)
+
+    parts = raw.split(":")
+    if len(parts) == 2:
+        minutes = int(parts[0])
+        sec = float(parts[1])
+        return (minutes * 60) + sec
+    if len(parts) == 3:
+        hours = int(parts[0])
+        minutes = int(parts[1])
+        sec = float(parts[2])
+        return (hours * 3600) + (minutes * 60) + sec
+    raise ValueError(f"Invalid time text: {value}")
+
+
+def frame_to_seconds(frame_index: int, fps: float) -> float:
+    frame = max(1, frame_index)
+    return (frame - 1) / fps
+
+
+def frame_to_text(frame_index: int, fps: float) -> str:
+    seconds = frame_to_seconds(frame_index, fps)
+    return f"{frame_index} ({format_seconds(seconds)})"
+
+
+def seconds_to_frame(seconds: float, fps: float, total_frames: int) -> int:
+    frame = int(round(max(0.0, seconds) * fps)) + 1
+    return max(1, min(total_frames, frame))
+
+
+def ms_to_frame(ms: int, fps: float, total_frames: int) -> int:
+    return seconds_to_frame(ms / 1000.0, fps, total_frames)
+
+
+def frame_to_ms(frame_index: int, fps: float) -> int:
+    return int(round(frame_to_seconds(frame_index, fps) * 1000))
+
+
+def _probe_total_frames(ffprobe_path: Path, video_path: Path) -> Optional[int]:
+    text = _run_capture(
+        [
+            str(ffprobe_path),
+            "-v",
+            "error",
+            "-count_frames",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=nb_read_frames",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(video_path),
+        ]
+    )
+    try:
+        value = int(text.strip())
+        if value > 0:
+            return value
+    except Exception:
+        pass
+    return None
+
+
 def get_video_info(ffprobe_path: Path, video_path: Path) -> VideoInfo:
     duration = _run_capture(
         [
@@ -91,10 +160,15 @@ def get_video_info(ffprobe_path: Path, video_path: Path) -> VideoInfo:
     )
     width_raw, height_raw = resolution.split("x")
 
+    total_frames = _probe_total_frames(ffprobe_path, video_path)
+    if total_frames is None:
+        total_frames = max(1, int(round(float(duration) * parse_fps(fps))))
+
     audio_codec = _probe_audio_codec(ffprobe_path, video_path)
     return VideoInfo(
         duration_sec=float(duration),
         fps=parse_fps(fps),
+        total_frames=total_frames,
         width=int(width_raw),
         height=int(height_raw),
         has_audio=bool(audio_codec),

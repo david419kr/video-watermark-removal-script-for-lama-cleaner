@@ -1,22 +1,24 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 import shutil
+import subprocess
 import threading
 import traceback
 
-from PySide6.QtCore import QThread, Qt, QUrl, Signal
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, QThread, QTimer, Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QCloseEvent, QDragEnterEvent, QDropEvent, QImage, QPainter, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
-    QDoubleSpinBox,
     QDialog,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -26,7 +28,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QProgressBar,
-    QSlider,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -38,9 +39,56 @@ from PySide6.QtWidgets import (
 from .config import AppConfig, Paths
 from .lama_manager import LamaCleanerManager
 from .mask_editor import MaskEditorDialog
-from .media_utils import extract_reference_frame, format_seconds, get_video_info
+from .media_utils import (
+    extract_reference_frame,
+    format_seconds,
+    frame_to_ms,
+    frame_to_seconds,
+    frame_to_text,
+    get_video_info,
+    ms_to_frame,
+    parse_time_text,
+    seconds_to_frame,
+)
 from .models import ProcessConfig, Segment, VideoInfo
 from .pipeline import PipelineCancelled, VideoProcessingPipeline
+from .timeline_slider import SegmentTimelineSlider
+
+
+class HoverPreviewPopup(QFrame):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent, Qt.ToolTip)
+        self.setFrameShape(QFrame.Box)
+        self.setLineWidth(1)
+        self.setStyleSheet(
+            "QFrame { background: #151515; border: 1px solid #555; } "
+            "QLabel { color: #efefef; }"
+        )
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+        self.image_label = QLabel()
+        self.image_label.setFixedSize(240, 136)
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.text_label = QLabel("00:00:00.000")
+        self.text_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.image_label)
+        layout.addWidget(self.text_label)
+        self.setLayout(layout)
+
+    def show_preview(self, pixmap: QPixmap, text: str, global_pos: QPoint) -> None:
+        self.image_label.setPixmap(
+            pixmap.scaled(
+                self.image_label.size(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+        )
+        self.text_label.setText(text)
+        self.adjustSize()
+        self.move(global_pos.x() + 14, global_pos.y() - self.height() - 8)
+        self.show()
 
 
 class ProcessingWorker(QThread):
@@ -80,7 +128,8 @@ class MainWindow(QMainWindow):
     def __init__(self, repo_root: Path) -> None:
         super().__init__()
         self.setWindowTitle("Lama Cleaner Video GUI (refactor/gui)")
-        self.resize(1400, 920)
+        self.resize(1420, 960)
+        self.setAcceptDrops(True)
 
         self.paths = Paths(repo_root)
         self.paths.workspace_root.mkdir(parents=True, exist_ok=True)
@@ -91,12 +140,28 @@ class MainWindow(QMainWindow):
         self.segments: list[Segment] = []
         self.worker: ProcessingWorker | None = None
         self._slider_dragging = False
+        self._table_refreshing = False
+        self._pending_seek_ms: int | None = None
+        self._hover_pending_ms: int | None = None
+        self._hover_pending_pos: QPoint | None = None
+        self._hover_pixmap_cache: OrderedDict[int, QPixmap] = OrderedDict()
+        self._mask_image_cache: dict[Path, QImage] = {}
+        self._mask_overlay_cache: OrderedDict[tuple[str, int, int], QPixmap] = OrderedDict()
+        self._current_mask_overlay_key: tuple[str, int, int] | None = None
+
+        self._key_seek_direction = 0
+        self._key_seek_tick_count = 0
 
         self.lama_manager: LamaCleanerManager | None = None
 
         self._build_ui()
+        self._build_timers()
         self._wire_player()
         self._init_lama_manager()
+
+        self.installEventFilter(self)
+        self.video_widget.installEventFilter(self)
+        self.timeline_slider.installEventFilter(self)
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -110,6 +175,21 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self._build_segment_group(), 2)
         root_layout.addWidget(self._build_run_group())
         root_layout.addWidget(self._build_log_group(), 1)
+
+    def _build_timers(self) -> None:
+        self._seek_timer = QTimer(self)
+        self._seek_timer.setSingleShot(True)
+        self._seek_timer.setInterval(24)
+        self._seek_timer.timeout.connect(self._apply_pending_seek)
+
+        self._hover_timer = QTimer(self)
+        self._hover_timer.setSingleShot(True)
+        self._hover_timer.setInterval(120)
+        self._hover_timer.timeout.connect(self._show_hover_preview)
+
+        self._key_seek_timer = QTimer(self)
+        self._key_seek_timer.setInterval(70)
+        self._key_seek_timer.timeout.connect(self._on_key_seek_tick)
 
     def _build_io_group(self) -> QGroupBox:
         box = QGroupBox("Input / Output")
@@ -153,7 +233,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.instance_spin)
         layout.addWidget(apply_btn)
         layout.addWidget(self.ports_label, 1)
-
         box.setLayout(layout)
         return box
 
@@ -162,7 +241,22 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout()
 
         self.video_widget = QVideoWidget()
-        self.video_widget.setMinimumHeight(260)
+        self.video_widget.setMinimumHeight(300)
+        self.video_widget.setFocusPolicy(Qt.StrongFocus)
+
+        self.mask_state_badge = QLabel("NO SEGMENT (SKIP)", self.video_widget)
+        self.mask_state_badge.setStyleSheet(
+            "QLabel { background: rgba(32,32,32,170); color: #f0f0f0; "
+            "border: 1px solid #909090; border-radius: 4px; padding: 4px 8px; }"
+        )
+        self.mask_state_badge.move(12, 12)
+        self.mask_state_badge.show()
+
+        self.mask_overlay_label = QLabel(self.video_widget)
+        self.mask_overlay_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.mask_overlay_label.setStyleSheet("background: transparent;")
+        self.mask_overlay_label.setScaledContents(False)
+        self.mask_overlay_label.hide()
 
         controls = QHBoxLayout()
         self.play_pause_btn = QPushButton("Play")
@@ -176,61 +270,82 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.duration_label)
         controls.addStretch(1)
 
-        self.timeline_slider = QSlider(Qt.Horizontal)
+        self.timeline_slider = SegmentTimelineSlider(Qt.Horizontal)
         self.timeline_slider.setRange(0, 0)
+        self.timeline_slider.setFocusPolicy(Qt.StrongFocus)
         self.timeline_slider.sliderPressed.connect(self._on_slider_pressed)
         self.timeline_slider.sliderReleased.connect(self._on_slider_released)
         self.timeline_slider.sliderMoved.connect(self._on_slider_moved)
-
+        self.timeline_slider.hoverMoved.connect(self._on_timeline_hover_moved)
+        self.timeline_slider.hoverLeft.connect(self._on_timeline_hover_left)
         segment_row = QHBoxLayout()
-        self.start_spin = QDoubleSpinBox()
-        self.start_spin.setDecimals(3)
-        self.start_spin.setMinimum(0.0)
-        self.start_spin.setMaximum(0.0)
-        self.start_spin.setSingleStep(0.1)
+        self.start_frame_spin = QSpinBox()
+        self.start_frame_spin.setMinimum(1)
+        self.start_frame_spin.setMaximum(1)
+        self.start_frame_spin.valueChanged.connect(self._on_start_frame_changed)
+        self.start_frame_time_hint = QLabel("(00:00:00.000)")
 
-        self.end_spin = QDoubleSpinBox()
-        self.end_spin.setDecimals(3)
-        self.end_spin.setMinimum(0.0)
-        self.end_spin.setMaximum(0.0)
-        self.end_spin.setSingleStep(0.1)
+        self.end_frame_spin = QSpinBox()
+        self.end_frame_spin.setMinimum(1)
+        self.end_frame_spin.setMaximum(1)
+        self.end_frame_spin.valueChanged.connect(self._on_end_frame_changed)
+        self.end_frame_time_hint = QLabel("(00:00:00.000)")
 
-        set_start_btn = QPushButton("Set Start = Current")
-        set_end_btn = QPushButton("Set End = Current")
+        set_start_btn = QPushButton("Set Start = Current Frame")
+        set_end_btn = QPushButton("Set End = Current Frame")
         set_start_btn.clicked.connect(self._set_start_from_current)
         set_end_btn.clicked.connect(self._set_end_from_current)
 
-        segment_row.addWidget(QLabel("Start (s)"))
-        segment_row.addWidget(self.start_spin)
+        segment_row.addWidget(QLabel("Start Frame"))
+        segment_row.addWidget(self.start_frame_spin)
+        segment_row.addWidget(self.start_frame_time_hint)
         segment_row.addWidget(set_start_btn)
-        segment_row.addSpacing(12)
-        segment_row.addWidget(QLabel("End (s)"))
-        segment_row.addWidget(self.end_spin)
+        segment_row.addSpacing(10)
+        segment_row.addWidget(QLabel("End Frame"))
+        segment_row.addWidget(self.end_frame_spin)
+        segment_row.addWidget(self.end_frame_time_hint)
         segment_row.addWidget(set_end_btn)
         segment_row.addStretch(1)
+
+        tip_label = QLabel("Tip: Click preview/seekbar, then Left/Right keys for frame-step seek. Hold for faster seek.")
+        tip_label.setStyleSheet("color: #c0c0c0;")
 
         layout.addWidget(self.video_widget, 1)
         layout.addLayout(controls)
         layout.addWidget(self.timeline_slider)
         layout.addLayout(segment_row)
+        layout.addWidget(tip_label)
         box.setLayout(layout)
+
+        self.hover_popup = HoverPreviewPopup(self)
+        self.hover_popup.hide()
         return box
 
     def _build_segment_group(self) -> QGroupBox:
         box = QGroupBox("Segments and Masks")
         layout = QVBoxLayout()
 
-        self.segment_table = QTableWidget(0, 4)
-        self.segment_table.setHorizontalHeaderLabels(["Start", "End", "Mask", "Segment ID"])
+        self.segment_table = QTableWidget(0, 6)
+        self.segment_table.setHorizontalHeaderLabels(
+            ["Start Frame", "Start Time", "End Frame", "End Time", "Mask", "Segment ID"]
+        )
         self.segment_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.segment_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.segment_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.segment_table.setEditTriggers(
+            QAbstractItemView.DoubleClicked
+            | QAbstractItemView.SelectedClicked
+            | QAbstractItemView.EditKeyPressed
+        )
         self.segment_table.verticalHeader().setVisible(False)
         self.segment_table.setAlternatingRowColors(True)
-        self.segment_table.setColumnWidth(0, 130)
-        self.segment_table.setColumnWidth(1, 130)
-        self.segment_table.setColumnWidth(2, 620)
-        self.segment_table.setColumnWidth(3, 140)
+        self.segment_table.itemChanged.connect(self._on_segment_table_item_changed)
+        self.segment_table.itemSelectionChanged.connect(self._on_segment_table_selection_changed)
+        self.segment_table.setColumnWidth(0, 120)
+        self.segment_table.setColumnWidth(1, 150)
+        self.segment_table.setColumnWidth(2, 120)
+        self.segment_table.setColumnWidth(3, 150)
+        self.segment_table.setColumnWidth(4, 520)
+        self.segment_table.setColumnWidth(5, 120)
 
         btn_row = QHBoxLayout()
         add_btn = QPushButton("Add Segment")
@@ -330,8 +445,9 @@ class MainWindow(QMainWindow):
         )
         if not file_path:
             return
+        self._load_video_file(Path(file_path))
 
-        video_path = Path(file_path)
+    def _load_video_file(self, video_path: Path) -> None:
         self.video_path_edit.setText(str(video_path))
         default_output = video_path.with_name(f"{video_path.stem}_cleaned.mp4")
         if not self.output_path_edit.text().strip():
@@ -340,13 +456,26 @@ class MainWindow(QMainWindow):
         try:
             self.video_info = get_video_info(self.paths.ffprobe, video_path)
             self.duration_label.setText(format_seconds(self.video_info.duration_sec))
-            self.start_spin.setMaximum(self.video_info.duration_sec)
-            self.end_spin.setMaximum(self.video_info.duration_sec)
-            self.end_spin.setValue(self.video_info.duration_sec)
+
+            self.start_frame_spin.blockSignals(True)
+            self.end_frame_spin.blockSignals(True)
+            self.start_frame_spin.setMaximum(self.video_info.total_frames)
+            self.end_frame_spin.setMaximum(self.video_info.total_frames)
+            self.start_frame_spin.setValue(1)
+            self.end_frame_spin.setValue(self.video_info.total_frames)
+            self.start_frame_spin.blockSignals(False)
+            self.end_frame_spin.blockSignals(False)
+            self._update_start_end_time_hints()
+
             self.log(
                 f"Loaded video: {video_path.name} "
-                f"({self.video_info.width}x{self.video_info.height}, {self.video_info.fps:.3f} fps)"
+                f"({self.video_info.width}x{self.video_info.height}, {self.video_info.fps:.3f} fps, "
+                f"{self.video_info.total_frames} frames)"
             )
+            self._hover_pixmap_cache.clear()
+            self._mask_image_cache.clear()
+            self._mask_overlay_cache.clear()
+            self._current_mask_overlay_key = None
         except Exception as exc:  # pylint: disable=broad-except
             self._error(f"Failed to probe video info.\n{exc}")
             return
@@ -356,7 +485,8 @@ class MainWindow(QMainWindow):
         self.play_pause_btn.setText("Play")
         self.current_time_label.setText("00:00:00.000")
         self.timeline_slider.setValue(0)
-
+        self.timeline_slider.set_segment_data(self.segments, self.video_info.total_frames)
+        self._update_mask_visuals(1)
     def _browse_output(self) -> None:
         file_path, _ = QFileDialog.getSaveFileName(
             self,
@@ -383,6 +513,7 @@ class MainWindow(QMainWindow):
         if not self._slider_dragging:
             self.timeline_slider.setValue(position_ms)
         self.current_time_label.setText(format_seconds(position_ms / 1000.0))
+        self._update_mask_visuals(self._frame_from_ms(position_ms))
 
     def _on_slider_pressed(self) -> None:
         self._slider_dragging = True
@@ -393,42 +524,168 @@ class MainWindow(QMainWindow):
 
     def _on_slider_moved(self, value: int) -> None:
         self.current_time_label.setText(format_seconds(value / 1000.0))
+        self._pending_seek_ms = value
+        if not self._seek_timer.isActive():
+            self._seek_timer.start()
+        self._update_mask_visuals(self._frame_from_ms(value))
+
+    def _apply_pending_seek(self) -> None:
+        if self._pending_seek_ms is None:
+            return
+        self.player.setPosition(self._pending_seek_ms)
+        self._pending_seek_ms = None
+
+    def _on_timeline_hover_moved(self, value_ms: int, global_x: int, global_y: int) -> None:
+        self._hover_pending_ms = value_ms
+        self._hover_pending_pos = QPoint(global_x, global_y)
+        if not self._hover_timer.isActive():
+            self._hover_timer.start()
+
+    def _on_timeline_hover_left(self) -> None:
+        self._hover_pending_ms = None
+        self._hover_pending_pos = None
+        self.hover_popup.hide()
+
+    def _show_hover_preview(self) -> None:
+        if self.video_info is None:
+            return
+        if self._hover_pending_ms is None or self._hover_pending_pos is None:
+            return
+
+        frame_index = self._frame_from_ms(self._hover_pending_ms)
+        pixmap = self._hover_preview_pixmap(frame_index)
+        if pixmap is None:
+            return
+
+        text = frame_to_text(frame_index, self.video_info.fps)
+        self.hover_popup.show_preview(pixmap, text, self._hover_pending_pos)
+
+    def _hover_preview_pixmap(self, frame_index: int) -> QPixmap | None:
+        if self.video_info is None:
+            return None
+        if frame_index in self._hover_pixmap_cache:
+            pixmap = self._hover_pixmap_cache.pop(frame_index)
+            self._hover_pixmap_cache[frame_index] = pixmap
+            return pixmap
+
+        video_path = Path(self.video_path_edit.text().strip())
+        if not video_path.exists():
+            return None
+
+        sec = frame_to_seconds(frame_index, self.video_info.fps)
+        command = [
+            str(self.paths.ffmpeg),
+            "-ss",
+            f"{sec:.3f}",
+            "-i",
+            str(video_path),
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=320:-1",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "png",
+            "-",
+        ]
+        result = subprocess.run(command, capture_output=True, check=False)
+        if result.returncode != 0 or not result.stdout:
+            return None
+
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(result.stdout):
+            return None
+
+        self._hover_pixmap_cache[frame_index] = pixmap
+        while len(self._hover_pixmap_cache) > 120:
+            self._hover_pixmap_cache.popitem(last=False)
+        return pixmap
 
     def _set_start_from_current(self) -> None:
-        self.start_spin.setValue(self.player.position() / 1000.0)
+        if self.video_info is None:
+            return
+        self.start_frame_spin.setValue(self._frame_from_ms(self.player.position()))
 
     def _set_end_from_current(self) -> None:
-        self.end_spin.setValue(self.player.position() / 1000.0)
+        if self.video_info is None:
+            return
+        self.end_frame_spin.setValue(self._frame_from_ms(self.player.position()))
+
+    def _on_start_frame_changed(self, value: int) -> None:
+        if self.video_info is None:
+            return
+        if value > self.end_frame_spin.value():
+            self.end_frame_spin.setValue(value)
+        self._update_start_end_time_hints()
+
+    def _on_end_frame_changed(self, value: int) -> None:
+        if self.video_info is None:
+            return
+        if value < self.start_frame_spin.value():
+            self.start_frame_spin.setValue(value)
+        self._update_start_end_time_hints()
+
+    def _update_start_end_time_hints(self) -> None:
+        if self.video_info is None:
+            self.start_frame_time_hint.setText("(00:00:00.000)")
+            self.end_frame_time_hint.setText("(00:00:00.000)")
+            return
+
+        start_sec = frame_to_seconds(self.start_frame_spin.value(), self.video_info.fps)
+        end_sec = frame_to_seconds(self.end_frame_spin.value(), self.video_info.fps)
+        self.start_frame_time_hint.setText(f"({format_seconds(start_sec)})")
+        self.end_frame_time_hint.setText(f"({format_seconds(end_sec)})")
 
     def _add_segment(self) -> None:
         if self.video_info is None:
             self._error("Load a video first.")
             return
 
-        start_sec = self.start_spin.value()
-        end_sec = self.end_spin.value()
-        segment = Segment(start_sec=start_sec, end_sec=end_sec)
+        segment = Segment(
+            start_frame=self.start_frame_spin.value(),
+            end_frame=self.end_frame_spin.value(),
+        )
 
         try:
             segment.validate()
-            if end_sec > self.video_info.duration_sec:
-                raise ValueError("Segment end exceeds video duration.")
+            self._validate_segment_bounds(segment)
             self._assert_no_overlap(segment)
         except Exception as exc:  # pylint: disable=broad-except
             self._error(str(exc))
             return
 
         self.segments.append(segment)
+        self.segments.sort(key=lambda s: s.start_frame)
         self._refresh_segment_table()
-        self.log(f"Added segment: {format_seconds(start_sec)} -> {format_seconds(end_sec)}")
+        for idx, current in enumerate(self.segments):
+            if current.segment_id == segment.segment_id:
+                self.segment_table.selectRow(idx)
+                break
+        self.log(
+            f"Added segment: {frame_to_text(segment.start_frame, self.video_info.fps)} "
+            f"-> {frame_to_text(segment.end_frame, self.video_info.fps)}"
+        )
 
-    def _assert_no_overlap(self, new_segment: Segment) -> None:
-        for segment in self.segments:
-            overlap = max(segment.start_sec, new_segment.start_sec) < min(segment.end_sec, new_segment.end_sec)
+    def _validate_segment_bounds(self, segment: Segment) -> None:
+        if self.video_info is None:
+            return
+        if segment.end_frame > self.video_info.total_frames:
+            raise ValueError(
+                f"Segment exceeds total frame count ({self.video_info.total_frames})."
+            )
+
+    def _assert_no_overlap(self, new_segment: Segment, skip_index: int | None = None) -> None:
+        for idx, segment in enumerate(self.segments):
+            if skip_index is not None and idx == skip_index:
+                continue
+            overlap = max(segment.start_frame, new_segment.start_frame) <= min(
+                segment.end_frame, new_segment.end_frame
+            )
             if overlap:
                 raise ValueError(
-                    f"Segment overlaps with existing segment "
-                    f"{format_seconds(segment.start_sec)} -> {format_seconds(segment.end_sec)}."
+                    f"Segment overlaps existing segment: "
+                    f"{segment.start_frame}-{segment.end_frame}"
                 )
 
     def _remove_selected_segment(self) -> None:
@@ -436,6 +693,7 @@ class MainWindow(QMainWindow):
         if row < 0 or row >= len(self.segments):
             return
         removed = self.segments.pop(row)
+        self._current_mask_overlay_key = None
         self._refresh_segment_table()
         self.log(f"Removed segment: {removed.segment_id}")
 
@@ -455,6 +713,8 @@ class MainWindow(QMainWindow):
             return
 
         segment.mask_path = Path(file_path)
+        self._mask_overlay_cache.clear()
+        self._current_mask_overlay_key = None
         self._refresh_segment_table()
         self.log(f"Assigned mask file to segment {segment.segment_id}: {segment.mask_path}")
 
@@ -462,6 +722,10 @@ class MainWindow(QMainWindow):
         segment = self._selected_segment()
         if segment is None:
             self._error("Select a segment first.")
+            return
+
+        if self.video_info is None:
+            self._error("Load a video first.")
             return
 
         video_path = Path(self.video_path_edit.text().strip())
@@ -473,7 +737,7 @@ class MainWindow(QMainWindow):
         ok = extract_reference_frame(
             ffmpeg_path=self.paths.ffmpeg,
             video_path=video_path,
-            time_sec=segment.start_sec,
+            time_sec=frame_to_seconds(segment.start_frame, self.video_info.fps),
             output_path=frame_ref_path,
         )
         if not ok:
@@ -489,27 +753,119 @@ class MainWindow(QMainWindow):
         )
         if dialog.exec() == QDialog.Accepted:
             segment.mask_path = save_mask_path
+            self._mask_overlay_cache.clear()
+            self._current_mask_overlay_key = None
             self._refresh_segment_table()
             self.log(f"Drawn mask saved for segment {segment.segment_id}: {save_mask_path}")
-
     def _selected_segment(self) -> Segment | None:
         row = self.segment_table.currentRow()
         if row < 0 or row >= len(self.segments):
             return None
         return self.segments[row]
 
-    def _refresh_segment_table(self) -> None:
-        self.segment_table.setRowCount(len(self.segments))
-        for row, segment in enumerate(self.segments):
-            start_item = QTableWidgetItem(format_seconds(segment.start_sec))
-            end_item = QTableWidgetItem(format_seconds(segment.end_sec))
-            mask_item = QTableWidgetItem(str(segment.mask_path) if segment.mask_path else "(skip / no mask)")
-            id_item = QTableWidgetItem(segment.segment_id)
+    def _on_segment_table_selection_changed(self) -> None:
+        if self._table_refreshing or self.video_info is None:
+            return
+        segment = self._selected_segment()
+        if segment is None:
+            return
 
-            self.segment_table.setItem(row, 0, start_item)
-            self.segment_table.setItem(row, 1, end_item)
-            self.segment_table.setItem(row, 2, mask_item)
-            self.segment_table.setItem(row, 3, id_item)
+        self.start_frame_spin.blockSignals(True)
+        self.end_frame_spin.blockSignals(True)
+        self.start_frame_spin.setValue(segment.start_frame)
+        self.end_frame_spin.setValue(segment.end_frame)
+        self.start_frame_spin.blockSignals(False)
+        self.end_frame_spin.blockSignals(False)
+        self._update_start_end_time_hints()
+        self.player.setPosition(self._ms_from_frame(segment.start_frame))
+
+    def _refresh_segment_table(self) -> None:
+        selected_segment_id: str | None = None
+        selected_row = self.segment_table.currentRow()
+        if 0 <= selected_row < len(self.segments):
+            selected_segment_id = self.segments[selected_row].segment_id
+
+        self._table_refreshing = True
+        try:
+            self.segment_table.setRowCount(len(self.segments))
+            for row, segment in enumerate(self.segments):
+                start_frame_item = QTableWidgetItem(str(segment.start_frame))
+                start_time_item = QTableWidgetItem(
+                    format_seconds(frame_to_seconds(segment.start_frame, self.video_info.fps)) if self.video_info else ""
+                )
+                end_frame_item = QTableWidgetItem(str(segment.end_frame))
+                end_time_item = QTableWidgetItem(
+                    format_seconds(frame_to_seconds(segment.end_frame, self.video_info.fps)) if self.video_info else ""
+                )
+                mask_item = QTableWidgetItem(str(segment.mask_path) if segment.mask_path else "(skip / no mask)")
+                id_item = QTableWidgetItem(segment.segment_id)
+
+                for item in (start_frame_item, start_time_item, end_frame_item, end_time_item):
+                    item.setFlags(item.flags() | Qt.ItemIsEditable)
+                for item in (mask_item, id_item):
+                    item.setFlags((item.flags() | Qt.ItemIsSelectable) & ~Qt.ItemIsEditable)
+
+                self.segment_table.setItem(row, 0, start_frame_item)
+                self.segment_table.setItem(row, 1, start_time_item)
+                self.segment_table.setItem(row, 2, end_frame_item)
+                self.segment_table.setItem(row, 3, end_time_item)
+                self.segment_table.setItem(row, 4, mask_item)
+                self.segment_table.setItem(row, 5, id_item)
+
+            if selected_segment_id is not None:
+                for idx, segment in enumerate(self.segments):
+                    if segment.segment_id == selected_segment_id:
+                        self.segment_table.selectRow(idx)
+                        break
+        finally:
+            self._table_refreshing = False
+
+        total_frames = self.video_info.total_frames if self.video_info else 0
+        self.timeline_slider.set_segment_data(self.segments, total_frames)
+        self._update_mask_visuals(self._frame_from_ms(self.player.position()))
+
+    def _on_segment_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._table_refreshing:
+            return
+        if self.video_info is None:
+            return
+
+        row = item.row()
+        col = item.column()
+        if row < 0 or row >= len(self.segments):
+            return
+        if col not in (0, 1, 2, 3):
+            return
+
+        segment = self.segments[row]
+        old_start = segment.start_frame
+        old_end = segment.end_frame
+
+        try:
+            text = item.text().strip()
+            if col == 0:
+                segment.start_frame = int(text)
+            elif col == 2:
+                segment.end_frame = int(text)
+            elif col == 1:
+                seconds = parse_time_text(text)
+                segment.start_frame = seconds_to_frame(seconds, self.video_info.fps, self.video_info.total_frames)
+            elif col == 3:
+                seconds = parse_time_text(text)
+                segment.end_frame = seconds_to_frame(seconds, self.video_info.fps, self.video_info.total_frames)
+
+            segment.validate()
+            self._validate_segment_bounds(segment)
+            self._assert_no_overlap(segment, skip_index=row)
+        except Exception as exc:  # pylint: disable=broad-except
+            segment.start_frame = old_start
+            segment.end_frame = old_end
+            self._refresh_segment_table()
+            self._error(f"Invalid segment edit: {exc}")
+            return
+
+        self.segments.sort(key=lambda s: s.start_frame)
+        self._refresh_segment_table()
 
     def _apply_instance_count(self) -> None:
         if self.lama_manager is None:
@@ -623,6 +979,223 @@ class MainWindow(QMainWindow):
         self.segment_table.setEnabled(not running)
         if not running:
             self.worker = None
+
+    def _frame_from_ms(self, ms: int) -> int:
+        if self.video_info is None:
+            return 1
+        return ms_to_frame(ms, self.video_info.fps, self.video_info.total_frames)
+
+    def _ms_from_frame(self, frame_index: int) -> int:
+        if self.video_info is None:
+            return 0
+        return frame_to_ms(frame_index, self.video_info.fps)
+
+    def _segment_for_frame(self, frame_index: int) -> Segment | None:
+        for segment in self.segments:
+            if segment.start_frame <= frame_index <= segment.end_frame:
+                return segment
+        return None
+
+    def _update_mask_state_badge(self, frame_index: int) -> None:
+        segment = self._segment_for_frame(frame_index)
+        if segment is None:
+            self.mask_state_badge.setText("NO SEGMENT (SKIP)")
+            self.mask_state_badge.setStyleSheet(
+                "QLabel { background: rgba(32,32,32,170); color: #f0f0f0; "
+                "border: 1px solid #909090; border-radius: 4px; padding: 4px 8px; }"
+            )
+            return
+
+        if segment.mask_path:
+            self.mask_state_badge.setText("MASK ACTIVE")
+            self.mask_state_badge.setStyleSheet(
+                "QLabel { background: rgba(110,22,22,180); color: #ffe0e0; "
+                "border: 1px solid #ff8f8f; border-radius: 4px; padding: 4px 8px; }"
+            )
+        else:
+            self.mask_state_badge.setText("SEGMENT (SKIP)")
+            self.mask_state_badge.setStyleSheet(
+                "QLabel { background: rgba(70,70,70,180); color: #e0e0e0; "
+                "border: 1px solid #bdbdbd; border-radius: 4px; padding: 4px 8px; }"
+            )
+
+    def _update_mask_visuals(self, frame_index: int) -> None:
+        self._update_mask_state_badge(frame_index)
+        self._update_mask_overlay(frame_index)
+
+    def _update_mask_overlay(self, frame_index: int) -> None:
+        segment = self._segment_for_frame(frame_index)
+        if segment is None or segment.mask_path is None or not segment.mask_path.exists():
+            self._current_mask_overlay_key = None
+            self.mask_overlay_label.hide()
+            return
+
+        target_rect = self._video_target_rect()
+        if target_rect.width() <= 0 or target_rect.height() <= 0:
+            self._current_mask_overlay_key = None
+            self.mask_overlay_label.hide()
+            return
+
+        cache_key = (str(segment.mask_path), target_rect.width(), target_rect.height())
+        if self._current_mask_overlay_key != cache_key:
+            pixmap = self._mask_overlay_cache.get(cache_key)
+            if pixmap is None:
+                mask_image = self._load_segment_mask(segment.mask_path)
+                if mask_image is None:
+                    self._current_mask_overlay_key = None
+                    self.mask_overlay_label.hide()
+                    return
+                pixmap = self._build_overlay_pixmap(mask_image, target_rect.size())
+                self._mask_overlay_cache[cache_key] = pixmap
+                while len(self._mask_overlay_cache) > 64:
+                    self._mask_overlay_cache.popitem(last=False)
+            else:
+                self._mask_overlay_cache.move_to_end(cache_key)
+
+            self.mask_overlay_label.setPixmap(pixmap)
+            self._current_mask_overlay_key = cache_key
+
+        self.mask_overlay_label.setGeometry(target_rect)
+        self.mask_overlay_label.show()
+        self.mask_overlay_label.raise_()
+        self.mask_state_badge.raise_()
+
+    def _video_target_rect(self) -> QRect:
+        width = self.video_widget.width()
+        height = self.video_widget.height()
+        if width <= 0 or height <= 0:
+            return QRect()
+
+        if self.video_info is None or self.video_info.width <= 0 or self.video_info.height <= 0:
+            return QRect(0, 0, width, height)
+
+        scale = min(width / self.video_info.width, height / self.video_info.height)
+        target_w = max(1, int(round(self.video_info.width * scale)))
+        target_h = max(1, int(round(self.video_info.height * scale)))
+        left = (width - target_w) // 2
+        top = (height - target_h) // 2
+        return QRect(left, top, target_w, target_h)
+
+    def _load_segment_mask(self, mask_path: Path) -> QImage | None:
+        key = mask_path.resolve()
+        if key in self._mask_image_cache:
+            return self._mask_image_cache[key]
+
+        image = QImage(str(mask_path))
+        if image.isNull():
+            self.log(f"Failed to load mask image: {mask_path}")
+            return None
+
+        mask = image.convertToFormat(QImage.Format_Grayscale8)
+        if (
+            self.video_info is not None
+            and (mask.width() != self.video_info.width or mask.height() != self.video_info.height)
+        ):
+            mask = mask.scaled(
+                self.video_info.width,
+                self.video_info.height,
+                Qt.IgnoreAspectRatio,
+                Qt.SmoothTransformation,
+            )
+
+        self._mask_image_cache[key] = mask
+        return mask
+
+    @staticmethod
+    def _build_overlay_pixmap(mask_image: QImage, target_size: QSize) -> QPixmap:
+        scaled_mask = mask_image.scaled(
+            target_size,
+            Qt.IgnoreAspectRatio,
+            Qt.FastTransformation,
+        )
+        overlay = QImage(target_size, QImage.Format_ARGB32)
+        overlay.fill(Qt.transparent)
+
+        painter = QPainter(overlay)
+        painter.fillRect(overlay.rect(), QColor(255, 70, 70, 170))
+        painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+        painter.drawImage(0, 0, scaled_mask)
+        painter.end()
+        return QPixmap.fromImage(overlay)
+
+    def _is_video_seek_context(self) -> bool:
+        fw = self.focusWidget()
+        return fw in (self.video_widget, self.timeline_slider)
+
+    def _step_frame(self, direction: int, step: int) -> None:
+        if self.video_info is None:
+            return
+        current_frame = self._frame_from_ms(self.player.position())
+        target = max(1, min(self.video_info.total_frames, current_frame + (direction * step)))
+        self.player.setPosition(self._ms_from_frame(target))
+
+    def _on_key_seek_tick(self) -> None:
+        if self._key_seek_direction == 0:
+            return
+        self._key_seek_tick_count += 1
+        if self._key_seek_tick_count <= 4:
+            step = 1
+        elif self._key_seek_tick_count <= 10:
+            step = 3
+        else:
+            step = 7
+        self._step_frame(self._key_seek_direction, step)
+
+    def eventFilter(self, watched, event):  # noqa: ANN001
+        if watched in (self.video_widget, self.timeline_slider):
+            if event.type() == QEvent.MouseButtonPress:
+                watched.setFocus()
+            if watched is self.video_widget and event.type() == QEvent.Resize:
+                self.mask_state_badge.move(12, 12)
+                self._current_mask_overlay_key = None
+                self._update_mask_overlay(self._frame_from_ms(self.player.position()))
+
+        if event.type() == QEvent.KeyPress:
+            if not self._is_video_seek_context():
+                return super().eventFilter(watched, event)
+            key = event.key()
+            if key in (Qt.Key_Left, Qt.Key_Right):
+                direction = -1 if key == Qt.Key_Left else 1
+                if self._key_seek_direction != direction:
+                    self._key_seek_direction = direction
+                    self._key_seek_tick_count = 0
+                    self._step_frame(direction, 1)
+                if not self._key_seek_timer.isActive():
+                    self._key_seek_timer.start()
+                return True
+
+        if event.type() == QEvent.KeyRelease:
+            key = event.key()
+            if key in (Qt.Key_Left, Qt.Key_Right) and (
+                self._key_seek_timer.isActive() or self._key_seek_direction != 0
+            ):
+                self._key_seek_timer.stop()
+                self._key_seek_direction = 0
+                self._key_seek_tick_count = 0
+                return True
+
+        return super().eventFilter(watched, event)
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.isLocalFile():
+                    suffix = Path(url.toLocalFile()).suffix.lower()
+                    if suffix in {".mp4", ".mov", ".mkv", ".avi", ".webm"}:
+                        event.acceptProposedAction()
+                        return
+        event.ignore()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        for url in event.mimeData().urls():
+            if not url.isLocalFile():
+                continue
+            path = Path(url.toLocalFile())
+            if path.suffix.lower() in {".mp4", ".mov", ".mkv", ".avi", ".webm"}:
+                self._load_video_file(path)
+                event.acceptProposedAction()
+                return
+        event.ignore()
 
     def log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
