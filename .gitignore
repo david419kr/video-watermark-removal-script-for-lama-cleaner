@@ -13,3 +13,4 @@ __pycache__/
 workspace/jobs/
 workspace/masks/ref-*.jpg
 workspace/masks/mask-*.png
+ui_settings.json
