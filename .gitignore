@@ -5,6 +5,7 @@
 *.wma
 *.mp3
 *.aac
+*.log
 temp/
 .runtime/
 .release/

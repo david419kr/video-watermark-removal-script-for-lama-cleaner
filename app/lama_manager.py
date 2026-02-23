@@ -15,6 +15,7 @@ from .config import AppConfig, Paths
 class ManagedInstance:
     port: int
     process: subprocess.Popen
+    log_path: Path | None = None
 
 
 class LamaCleanerManager:
@@ -23,6 +24,8 @@ class LamaCleanerManager:
         self._log = log_fn
         self._instances: list[ManagedInstance] = []
         self._lama_exe = self._resolve_lama_executable()
+        self._logs_dir = self._paths.workspace_root / "lama_logs"
+        self._logs_dir.mkdir(parents=True, exist_ok=True)
 
     def _resolve_lama_executable(self) -> Path:
         if self._paths.local_lama.exists():
@@ -91,21 +94,45 @@ class LamaCleanerManager:
             "--device=cuda",
             f"--port={port}",
         ]
+        log_path = self._logs_dir / f"lama_{port}_{int(time.time())}.log"
         self._log(f"Starting lama-cleaner on port {port}...")
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+        with log_path.open("ab") as log_file:
+            process = subprocess.Popen(
+                command,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
 
         started = self._wait_for_port(port, timeout_sec=15)
         if not started:
             process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+            detail = self._read_log_tail(log_path)
+            if detail:
+                raise RuntimeError(f"lama-cleaner failed to open port {port}.\n{detail}")
             raise RuntimeError(f"lama-cleaner failed to open port {port}.")
 
-        self._instances.append(ManagedInstance(port=port, process=process))
+        self._instances.append(ManagedInstance(port=port, process=process, log_path=log_path))
         self._log(f"lama-cleaner running on port {port}.")
+
+    @staticmethod
+    def _read_log_tail(path: Path, max_lines: int = 20) -> str:
+        if not path.exists():
+            return ""
+        try:
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            return ""
+
+        tail = [line.strip() for line in lines if line.strip()][-max_lines:]
+        if not tail:
+            return ""
+        return "Last log lines:\n" + "\n".join(tail)
 
     def _wait_for_port(self, port: int, timeout_sec: float) -> bool:
         start = time.time()
