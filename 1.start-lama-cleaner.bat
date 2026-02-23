@@ -15,6 +15,7 @@ set "GET_PIP=%RUNTIME_DIR%\get-pip.py"
 set "GET_PIP_URL=https://bootstrap.pypa.io/get-pip.py"
 set "GET_PIP_URL_FALLBACK=https://bootstrap.pypa.io/pip/get-pip.py"
 set "INSTALL_MARKER=%RUNTIME_DIR%\lama_cleaner_ready.flag"
+set "BASE_PORT=8080"
 
 if not exist "%RUNTIME_DIR%" mkdir "%RUNTIME_DIR%"
 
@@ -25,8 +26,37 @@ call :ensure_packages
 if errorlevel 1 goto :fail
 
 echo.
-echo Starting lama-cleaner...
-"%LAMA_EXE%" --model=lama --device=cuda --port=8080
+set "INSTANCE_COUNT="
+set /p "INSTANCE_COUNT=How many lama-cleaner instances to run? [default: 1] "
+set "INSTANCE_COUNT=%INSTANCE_COUNT: =%"
+if not defined INSTANCE_COUNT set "INSTANCE_COUNT=1"
+
+for /f "delims=0123456789" %%A in ("%INSTANCE_COUNT%") do (
+  echo Invalid input: "%INSTANCE_COUNT%"
+  echo Please enter a positive integer.
+  goto :fail
+)
+
+if "%INSTANCE_COUNT%"=="0" (
+  echo Invalid input: "%INSTANCE_COUNT%"
+  echo Please enter a positive integer.
+  goto :fail
+)
+
+if "%INSTANCE_COUNT%"=="1" (
+  echo Starting lama-cleaner on port %BASE_PORT%...
+  "%LAMA_EXE%" --model=lama --device=cuda --port=%BASE_PORT%
+  goto :eof
+)
+
+set /a END_INDEX=%INSTANCE_COUNT%-1
+echo Starting %INSTANCE_COUNT% lama-cleaner instances from port %BASE_PORT%...
+for /L %%I in (0,1,!END_INDEX!) do (
+  set /a PORT=%BASE_PORT%+%%I
+  echo Launching lama-cleaner on port !PORT!...
+  start "lama-cleaner-!PORT!" "%LAMA_EXE%" --model=lama --device=cuda --port=!PORT!
+)
+echo All instances launched.
 goto :eof
 
 :ensure_python
