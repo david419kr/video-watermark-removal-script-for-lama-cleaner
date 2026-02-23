@@ -1,6 +1,7 @@
 # Lama Cleaner Video GUI
 
 [한국어 README 보기](readme.ko.md)
+Release에서 받으세요: [GUI Release ZIP](https://github.com/david419kr/lama-cleaner-video-gui/releases/download/v0.1.0/gui-release-v0.1.0.zip)
 
 Legacy CLI/script version is preserved in `legacy/cli-script`.
 

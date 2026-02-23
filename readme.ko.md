@@ -1,5 +1,7 @@
 # Lama Cleaner Video GUI (한국어)
 
+Release에서 받으세요: [GUI Release ZIP](https://github.com/david419kr/lama-cleaner-video-gui/releases/download/v0.1.0/gui-release-v0.1.0.zip)
+
 기존 CLI 스크립트 버전은 `legacy/cli-script` 브랜치에 보관되어 있습니다.
 
 `lama-cleaner`를 사용해 동영상 워터마크/오브젝트를 구간 단위로 제거하는 Windows 네이티브 GUI 앱입니다.
