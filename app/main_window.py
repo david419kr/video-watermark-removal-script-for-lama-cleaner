@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from datetime import datetime
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -9,11 +10,26 @@ import threading
 import traceback
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, QThread, QTimer, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QCloseEvent, QDragEnterEvent, QDropEvent, QImage, QPainter, QPixmap
+from PySide6.QtGui import (
+    QColor,
+    QCloseEvent,
+    QCursor,
+    QDragEnterEvent,
+    QDragLeaveEvent,
+    QDragMoveEvent,
+    QDropEvent,
+    QIcon,
+    QImage,
+    QPainter,
+    QPen,
+    QPixmap,
+    QPolygon,
+)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QDialog,
     QFileDialog,
@@ -28,7 +44,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QProgressBar,
+    QSizePolicy,
     QSpinBox,
+    QStyle,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -91,6 +109,84 @@ class HoverPreviewPopup(QFrame):
         self.show()
 
 
+class BlockingOverlay(QFrame):
+    def __init__(
+        self,
+        parent: QWidget,
+        default_text: str,
+        style_name: str,
+        *,
+        top_level: bool = False,
+        transparent_for_mouse: bool = False,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName(style_name)
+        self._is_drop_overlay = style_name == "dropOverlay"
+        self._top_level = top_level
+        if top_level:
+            flags = Qt.Tool | Qt.FramelessWindowHint
+            if transparent_for_mouse:
+                flags = Qt.ToolTip | Qt.FramelessWindowHint
+            self.setWindowFlags(flags)
+            self.setAttribute(Qt.WA_TranslucentBackground, True)
+            self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        if transparent_for_mouse:
+            self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            window_transparent_flag = getattr(Qt, "WindowTransparentForInput", None)
+            if window_transparent_flag is not None:
+                self.setWindowFlag(window_transparent_flag, True)
+        self.setAcceptDrops(False)
+        self.hide()
+
+        if style_name == "loadingOverlay":
+            self.setStyleSheet(
+                "#loadingOverlay { background: rgba(0,0,0,150); } "
+                "#loadingPanel { background: rgba(22,22,22,225); border: 1px solid #707070; border-radius: 8px; } "
+                "#loadingText { color: #f2f2f2; font-size: 15px; font-weight: 600; }"
+            )
+        else:
+            self.setStyleSheet(
+                "#dropPanel { background: rgba(16,26,42,215); border: 1px solid #4d7fb8; border-radius: 8px; } "
+                "#dropText { color: #f3f8ff; font-size: 18px; font-weight: 700; }"
+            )
+
+        root = QVBoxLayout()
+        root.setContentsMargins(24, 24, 24, 24)
+        root.addStretch(1)
+
+        panel = QFrame()
+        panel.setObjectName("loadingPanel" if style_name == "loadingOverlay" else "dropPanel")
+        panel_layout = QVBoxLayout()
+        panel_layout.setContentsMargins(18, 14, 18, 14)
+        panel_layout.setSpacing(6)
+
+        self.text_label = QLabel(default_text)
+        self.text_label.setObjectName("loadingText" if style_name == "loadingOverlay" else "dropText")
+        self.text_label.setAlignment(Qt.AlignCenter)
+        panel_layout.addWidget(self.text_label)
+        panel.setLayout(panel_layout)
+
+        root.addWidget(panel, 0, Qt.AlignCenter)
+        root.addStretch(1)
+        self.setLayout(root)
+
+    def set_message(self, message: str) -> None:
+        self.text_label.setText(message)
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001
+        if self._is_drop_overlay:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.fillRect(self.rect(), QColor(30, 58, 95, 115))
+            pen = QPen(QColor(91, 166, 255, 220), 3)
+            pen.setStyle(Qt.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(self.rect().adjusted(10, 10, -10, -10), 10, 10)
+            painter.end()
+        super().paintEvent(event)
+
+
 class ProcessingWorker(QThread):
     log_message = Signal(str)
     progress_update = Signal(int, int)
@@ -127,7 +223,7 @@ class ProcessingWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self, repo_root: Path) -> None:
         super().__init__()
-        self.setWindowTitle("Lama Cleaner Video GUI (refactor/gui)")
+        self.setWindowTitle("Lama Cleaner Video GUI")
         self.resize(1420, 960)
         self.setAcceptDrops(True)
 
@@ -151,13 +247,17 @@ class MainWindow(QMainWindow):
 
         self._key_seek_direction = 0
         self._key_seek_tick_count = 0
+        self._loading_overlay_depth = 0
+        self._drop_overlay_visible = False
 
         self.lama_manager: LamaCleanerManager | None = None
+        self._lama_init_pending = True
 
         self._build_ui()
+        self._pencil_icon = self._create_pencil_icon()
+        self._load_ui_settings()
         self._build_timers()
         self._wire_player()
-        self._init_lama_manager()
 
         self.installEventFilter(self)
         self.video_widget.installEventFilter(self)
@@ -176,6 +276,22 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self._build_run_group())
         root_layout.addWidget(self._build_log_group(), 1)
 
+        self.loading_overlay = BlockingOverlay(
+            self,
+            "Loading...",
+            "loadingOverlay",
+            top_level=True,
+            transparent_for_mouse=False,
+        )
+        self.drop_overlay = BlockingOverlay(
+            self,
+            "Drop video file to open",
+            "dropOverlay",
+            top_level=True,
+            transparent_for_mouse=True,
+        )
+        self._resize_overlays()
+
     def _build_timers(self) -> None:
         self._seek_timer = QTimer(self)
         self._seek_timer.setSingleShot(True)
@@ -190,6 +306,93 @@ class MainWindow(QMainWindow):
         self._key_seek_timer = QTimer(self)
         self._key_seek_timer.setInterval(70)
         self._key_seek_timer.timeout.connect(self._on_key_seek_tick)
+
+    def _resize_overlays(self) -> None:
+        if not hasattr(self, "loading_overlay") or not hasattr(self, "drop_overlay"):
+            return
+        top_left = self.mapToGlobal(QPoint(0, 0))
+        rect = QRect(top_left, self.size())
+        self.loading_overlay.setGeometry(rect)
+        self.drop_overlay.setGeometry(rect)
+
+    @staticmethod
+    def _create_pencil_icon() -> QIcon:
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        painter.setPen(QPen(QColor(67, 67, 67), 2))
+        painter.drawLine(3, 13, 11, 5)
+
+        painter.setBrush(QColor(251, 191, 36))
+        painter.setPen(QPen(QColor(145, 110, 8), 1))
+        painter.drawPolygon(QPolygon([QPoint(4, 13), QPoint(3, 15), QPoint(6, 14)]))
+
+        painter.setBrush(QColor(255, 220, 120))
+        painter.setPen(QPen(QColor(120, 90, 10), 1))
+        painter.drawPolygon(QPolygon([QPoint(10, 5), QPoint(12, 3), QPoint(13, 4), QPoint(11, 6)]))
+
+        painter.setBrush(QColor(230, 80, 80))
+        painter.setPen(Qt.NoPen)
+        painter.drawRect(2, 12, 2, 2)
+        painter.end()
+
+        return QIcon(pixmap)
+
+    def _show_loading_overlay(self, message: str) -> None:
+        self._loading_overlay_depth += 1
+        self.loading_overlay.set_message(message)
+        self._resize_overlays()
+        self.loading_overlay.show()
+        self.loading_overlay.raise_()
+        QApplication.processEvents()
+
+    def _hide_loading_overlay(self) -> None:
+        if self._loading_overlay_depth > 0:
+            self._loading_overlay_depth -= 1
+        if self._loading_overlay_depth == 0:
+            self.loading_overlay.hide()
+        QApplication.processEvents()
+
+    def _show_drop_overlay(self) -> None:
+        if self._drop_overlay_visible:
+            return
+        self._resize_overlays()
+        self.drop_overlay.show()
+        self.drop_overlay.raise_()
+        self._drop_overlay_visible = True
+
+    def _hide_drop_overlay(self) -> None:
+        if not self._drop_overlay_visible:
+            return
+        self.drop_overlay.hide()
+        self._drop_overlay_visible = False
+
+    def _settings_path(self) -> Path:
+        return self.paths.ui_settings
+
+    def _load_ui_settings(self) -> None:
+        path = self._settings_path()
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            value = int(data.get("instance_count", AppConfig.DEFAULT_INSTANCE_COUNT))
+            value = max(1, min(AppConfig.MAX_INSTANCE_COUNT, value))
+            self.instance_spin.setValue(value)
+        except Exception as exc:  # pylint: disable=broad-except
+            self.log(f"Failed to load UI settings: {exc}")
+
+    def _save_ui_settings(self) -> None:
+        path = self._settings_path()
+        payload = {"instance_count": int(self.instance_spin.value())}
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+        except Exception as exc:  # pylint: disable=broad-except
+            self.log(f"Failed to save UI settings: {exc}")
 
     def _build_io_group(self) -> QGroupBox:
         box = QGroupBox("Input / Output")
@@ -222,6 +425,7 @@ class MainWindow(QMainWindow):
         self.instance_spin.setMinimum(1)
         self.instance_spin.setMaximum(AppConfig.MAX_INSTANCE_COUNT)
         self.instance_spin.setValue(AppConfig.DEFAULT_INSTANCE_COUNT)
+        self.instance_spin.valueChanged.connect(lambda _: self._save_ui_settings())
 
         apply_btn = QPushButton("Apply Instance Count")
         apply_btn.clicked.connect(self._apply_instance_count)
@@ -243,6 +447,7 @@ class MainWindow(QMainWindow):
         self.video_widget = QVideoWidget()
         self.video_widget.setMinimumHeight(300)
         self.video_widget.setFocusPolicy(Qt.StrongFocus)
+        self.video_widget.setAcceptDrops(True)
 
         self.mask_state_badge = QLabel("NO SEGMENT (SKIP)", self.video_widget)
         self.mask_state_badge.setStyleSheet(
@@ -268,6 +473,15 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.current_time_label)
         controls.addWidget(QLabel("/"))
         controls.addWidget(self.duration_label)
+        controls.addSpacing(14)
+        controls.addWidget(QLabel("Frame"))
+        self.current_frame_label = QLabel("1")
+        self.total_frame_label = QLabel("1")
+        self.current_frame_label.setStyleSheet("font-weight: 600;")
+        self.total_frame_label.setStyleSheet("font-weight: 600;")
+        controls.addWidget(self.current_frame_label)
+        controls.addWidget(QLabel("/"))
+        controls.addWidget(self.total_frame_label)
         controls.addStretch(1)
 
         self.timeline_slider = SegmentTimelineSlider(Qt.Horizontal)
@@ -293,8 +507,16 @@ class MainWindow(QMainWindow):
 
         set_start_btn = QPushButton("Set Start = Current Frame")
         set_end_btn = QPushButton("Set End = Current Frame")
+        self.add_segment_btn = QPushButton("Add Segment")
+        self.add_segment_btn.setStyleSheet(
+            "QPushButton { background: #2563eb; color: #ffffff; font-weight: 700; "
+            "padding: 6px 14px; border-radius: 5px; }"
+            "QPushButton:hover { background: #1d4ed8; }"
+            "QPushButton:disabled { background: #4a4a4a; color: #bdbdbd; }"
+        )
         set_start_btn.clicked.connect(self._set_start_from_current)
         set_end_btn.clicked.connect(self._set_end_from_current)
+        self.add_segment_btn.clicked.connect(self._add_segment)
 
         segment_row.addWidget(QLabel("Start Frame"))
         segment_row.addWidget(self.start_frame_spin)
@@ -305,6 +527,8 @@ class MainWindow(QMainWindow):
         segment_row.addWidget(self.end_frame_spin)
         segment_row.addWidget(self.end_frame_time_hint)
         segment_row.addWidget(set_end_btn)
+        segment_row.addSpacing(14)
+        segment_row.addWidget(self.add_segment_btn)
         segment_row.addStretch(1)
 
         tip_label = QLabel("Tip: Click preview/seekbar, then Left/Right keys for frame-step seek. Hold for faster seek.")
@@ -327,7 +551,7 @@ class MainWindow(QMainWindow):
 
         self.segment_table = QTableWidget(0, 6)
         self.segment_table.setHorizontalHeaderLabels(
-            ["Start Frame", "Start Time", "End Frame", "End Time", "Mask", "Segment ID"]
+            ["Start Frame", "Start Time", "End Frame", "End Time", "Mask", "Remove"]
         )
         self.segment_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.segment_table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -345,27 +569,12 @@ class MainWindow(QMainWindow):
         self.segment_table.setColumnWidth(2, 120)
         self.segment_table.setColumnWidth(3, 150)
         self.segment_table.setColumnWidth(4, 520)
-        self.segment_table.setColumnWidth(5, 120)
+        self.segment_table.setColumnWidth(5, 82)
 
-        btn_row = QHBoxLayout()
-        add_btn = QPushButton("Add Segment")
-        remove_btn = QPushButton("Remove Selected")
-        mask_file_btn = QPushButton("Assign Mask File")
-        draw_mask_btn = QPushButton("Draw Mask")
-
-        add_btn.clicked.connect(self._add_segment)
-        remove_btn.clicked.connect(self._remove_selected_segment)
-        mask_file_btn.clicked.connect(self._assign_mask_file)
-        draw_mask_btn.clicked.connect(self._draw_mask_for_selected)
-
-        btn_row.addWidget(add_btn)
-        btn_row.addWidget(remove_btn)
-        btn_row.addWidget(mask_file_btn)
-        btn_row.addWidget(draw_mask_btn)
-        btn_row.addStretch(1)
-
+        tip = QLabel("Mask column actions: folder icon = choose file, pencil icon = draw mask.")
+        tip.setStyleSheet("color: #c0c0c0;")
         layout.addWidget(self.segment_table, 1)
-        layout.addLayout(btn_row)
+        layout.addWidget(tip)
         box.setLayout(layout)
         return box
 
@@ -376,8 +585,19 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         self.keep_temp_box = QCheckBox("Keep temporary job folder")
         self.start_btn = QPushButton("Start Processing")
+        self.start_btn.setStyleSheet(
+            "QPushButton { background: #198754; color: #ffffff; font-weight: 700; "
+            "padding: 8px 18px; border-radius: 6px; }"
+            "QPushButton:hover { background: #157347; }"
+            "QPushButton:disabled { background: #4a4a4a; color: #bdbdbd; }"
+        )
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setStyleSheet(
+            "QPushButton { background: #3e3e3e; color: #d6d6d6; border-radius: 6px; padding: 8px 14px; }"
+            "QPushButton:enabled { background: #b42318; color: #ffffff; font-weight: 700; }"
+            "QPushButton:enabled:hover { background: #8f1c14; }"
+        )
         self.start_btn.clicked.connect(self._start_processing)
         self.cancel_btn.clicked.connect(self._cancel_processing)
 
@@ -412,6 +632,12 @@ class MainWindow(QMainWindow):
         self.player.positionChanged.connect(self._on_player_position_changed)
         self.player.durationChanged.connect(self._on_player_duration_changed)
 
+    def showEvent(self, event) -> None:  # noqa: ANN001
+        super().showEvent(event)
+        if self._lama_init_pending:
+            self._lama_init_pending = False
+            QTimer.singleShot(0, self._init_lama_manager)
+
     def _init_lama_manager(self) -> None:
         try:
             self.lama_manager = LamaCleanerManager(paths=self.paths, log_fn=self.log)
@@ -427,14 +653,19 @@ class MainWindow(QMainWindow):
     def _auto_start_lama(self) -> None:
         if self.lama_manager is None:
             return
+        target = max(1, min(AppConfig.MAX_INSTANCE_COUNT, self.instance_spin.value()))
+        self._show_loading_overlay(f"Starting lama-cleaner instances ({target})...")
         try:
-            self.lama_manager.ensure_default_instance()
+            self.lama_manager.set_instance_count(target)
             self._refresh_ports_label()
+            self._save_ui_settings()
         except Exception as exc:  # pylint: disable=broad-except
             self._error(
                 "Failed to start lama-cleaner automatically.\n"
                 f"{exc}\n\nEnsure lama-cleaner is available, then reopen the GUI."
             )
+        finally:
+            self._hide_loading_overlay()
 
     def _browse_video(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
@@ -448,12 +679,13 @@ class MainWindow(QMainWindow):
         self._load_video_file(Path(file_path))
 
     def _load_video_file(self, video_path: Path) -> None:
-        self.video_path_edit.setText(str(video_path))
-        default_output = video_path.with_name(f"{video_path.stem}_cleaned.mp4")
-        if not self.output_path_edit.text().strip():
-            self.output_path_edit.setText(str(default_output))
-
+        self._show_loading_overlay(f"Loading video: {video_path.name}")
         try:
+            self.video_path_edit.setText(str(video_path))
+            default_output = video_path.with_name(f"{video_path.stem}_cleaned.mp4")
+            if not self.output_path_edit.text().strip():
+                self.output_path_edit.setText(str(default_output))
+
             self.video_info = get_video_info(self.paths.ffprobe, video_path)
             self.duration_label.setText(format_seconds(self.video_info.duration_sec))
 
@@ -466,6 +698,8 @@ class MainWindow(QMainWindow):
             self.start_frame_spin.blockSignals(False)
             self.end_frame_spin.blockSignals(False)
             self._update_start_end_time_hints()
+            self.current_frame_label.setText("1")
+            self.total_frame_label.setText(str(self.video_info.total_frames))
 
             self.log(
                 f"Loaded video: {video_path.name} "
@@ -479,6 +713,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # pylint: disable=broad-except
             self._error(f"Failed to probe video info.\n{exc}")
             return
+        finally:
+            self._hide_loading_overlay()
 
         self.player.setSource(QUrl.fromLocalFile(str(video_path)))
         self.player.pause()
@@ -510,10 +746,12 @@ class MainWindow(QMainWindow):
         self.duration_label.setText(format_seconds(duration_ms / 1000.0))
 
     def _on_player_position_changed(self, position_ms: int) -> None:
+        frame_index = self._frame_from_ms(position_ms)
+        self.current_frame_label.setText(str(frame_index))
         if not self._slider_dragging:
             self.timeline_slider.setValue(position_ms)
         self.current_time_label.setText(format_seconds(position_ms / 1000.0))
-        self._update_mask_visuals(self._frame_from_ms(position_ms))
+        self._update_mask_visuals(frame_index)
 
     def _on_slider_pressed(self) -> None:
         self._slider_dragging = True
@@ -523,11 +761,13 @@ class MainWindow(QMainWindow):
         self.player.setPosition(self.timeline_slider.value())
 
     def _on_slider_moved(self, value: int) -> None:
+        frame_index = self._frame_from_ms(value)
+        self.current_frame_label.setText(str(frame_index))
         self.current_time_label.setText(format_seconds(value / 1000.0))
         self._pending_seek_ms = value
         if not self._seek_timer.isActive():
             self._seek_timer.start()
-        self._update_mask_visuals(self._frame_from_ms(value))
+        self._update_mask_visuals(frame_index)
 
     def _apply_pending_seek(self) -> None:
         if self._pending_seek_ms is None:
@@ -688,21 +928,7 @@ class MainWindow(QMainWindow):
                     f"{segment.start_frame}-{segment.end_frame}"
                 )
 
-    def _remove_selected_segment(self) -> None:
-        row = self.segment_table.currentRow()
-        if row < 0 or row >= len(self.segments):
-            return
-        removed = self.segments.pop(row)
-        self._current_mask_overlay_key = None
-        self._refresh_segment_table()
-        self.log(f"Removed segment: {removed.segment_id}")
-
-    def _assign_mask_file(self) -> None:
-        segment = self._selected_segment()
-        if segment is None:
-            self._error("Select a segment first.")
-            return
-
+    def _assign_mask_file_for_segment(self, segment: Segment) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select Mask Image",
@@ -718,12 +944,7 @@ class MainWindow(QMainWindow):
         self._refresh_segment_table()
         self.log(f"Assigned mask file to segment {segment.segment_id}: {segment.mask_path}")
 
-    def _draw_mask_for_selected(self) -> None:
-        segment = self._selected_segment()
-        if segment is None:
-            self._error("Select a segment first.")
-            return
-
+    def _draw_mask_for_segment(self, segment: Segment) -> None:
         if self.video_info is None:
             self._error("Load a video first.")
             return
@@ -757,11 +978,96 @@ class MainWindow(QMainWindow):
             self._current_mask_overlay_key = None
             self._refresh_segment_table()
             self.log(f"Drawn mask saved for segment {segment.segment_id}: {save_mask_path}")
+
+    def _segment_index_by_id(self, segment_id: str) -> int | None:
+        for idx, segment in enumerate(self.segments):
+            if segment.segment_id == segment_id:
+                return idx
+        return None
+
+    def _remove_segment_by_id(self, segment_id: str) -> None:
+        idx = self._segment_index_by_id(segment_id)
+        if idx is None:
+            return
+        removed = self.segments.pop(idx)
+        self._current_mask_overlay_key = None
+        self._refresh_segment_table()
+        self.log(f"Removed segment: {removed.segment_id}")
+
+    def _assign_mask_for_segment_id(self, segment_id: str) -> None:
+        idx = self._segment_index_by_id(segment_id)
+        if idx is None:
+            return
+        self.segment_table.selectRow(idx)
+        self._assign_mask_file_for_segment(self.segments[idx])
+
+    def _draw_mask_for_segment_id(self, segment_id: str) -> None:
+        idx = self._segment_index_by_id(segment_id)
+        if idx is None:
+            return
+        self.segment_table.selectRow(idx)
+        self._draw_mask_for_segment(self.segments[idx])
+
     def _selected_segment(self) -> Segment | None:
         row = self.segment_table.currentRow()
         if row < 0 or row >= len(self.segments):
             return None
         return self.segments[row]
+
+    def _build_mask_cell_widget(self, segment: Segment) -> QWidget:
+        widget = QWidget()
+        row_layout = QHBoxLayout()
+        row_layout.setContentsMargins(4, 2, 4, 2)
+        row_layout.setSpacing(6)
+
+        open_btn = QPushButton()
+        open_btn.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
+        open_btn.setToolTip("Assign mask file")
+        open_btn.setFixedSize(28, 24)
+        open_btn.clicked.connect(
+            lambda _=False, sid=segment.segment_id: self._assign_mask_for_segment_id(sid)
+        )
+
+        draw_btn = QPushButton()
+        draw_btn.setIcon(self._pencil_icon)
+        draw_btn.setToolTip("Draw mask")
+        draw_btn.setFixedSize(28, 24)
+        draw_btn.clicked.connect(
+            lambda _=False, sid=segment.segment_id: self._draw_mask_for_segment_id(sid)
+        )
+
+        path_label = QLabel(segment.mask_path.name if segment.mask_path else "(skip / no mask)")
+        path_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        path_label.setToolTip(str(segment.mask_path) if segment.mask_path else "No mask assigned")
+
+        row_layout.addWidget(open_btn)
+        row_layout.addWidget(draw_btn)
+        row_layout.addWidget(path_label, 1)
+        widget.setLayout(row_layout)
+        return widget
+
+    def _build_remove_cell_widget(self, segment: Segment) -> QWidget:
+        widget = QWidget()
+        row_layout = QHBoxLayout()
+        row_layout.setContentsMargins(8, 2, 8, 2)
+        row_layout.setSpacing(0)
+
+        remove_btn = QPushButton("X")
+        remove_btn.setToolTip("Remove this segment")
+        remove_btn.setFixedSize(28, 24)
+        remove_btn.setStyleSheet(
+            "QPushButton { background: #b42318; color: #ffffff; font-weight: 700; "
+            "border-radius: 4px; }"
+            "QPushButton:hover { background: #912018; }"
+            "QPushButton:disabled { background: #4a4a4a; color: #bdbdbd; }"
+        )
+        remove_btn.clicked.connect(
+            lambda _=False, sid=segment.segment_id: self._remove_segment_by_id(sid)
+        )
+
+        row_layout.addWidget(remove_btn, 0, Qt.AlignCenter)
+        widget.setLayout(row_layout)
+        return widget
 
     def _on_segment_table_selection_changed(self) -> None:
         if self._table_refreshing or self.video_info is None:
@@ -797,20 +1103,16 @@ class MainWindow(QMainWindow):
                 end_time_item = QTableWidgetItem(
                     format_seconds(frame_to_seconds(segment.end_frame, self.video_info.fps)) if self.video_info else ""
                 )
-                mask_item = QTableWidgetItem(str(segment.mask_path) if segment.mask_path else "(skip / no mask)")
-                id_item = QTableWidgetItem(segment.segment_id)
 
                 for item in (start_frame_item, start_time_item, end_frame_item, end_time_item):
                     item.setFlags(item.flags() | Qt.ItemIsEditable)
-                for item in (mask_item, id_item):
-                    item.setFlags((item.flags() | Qt.ItemIsSelectable) & ~Qt.ItemIsEditable)
 
                 self.segment_table.setItem(row, 0, start_frame_item)
                 self.segment_table.setItem(row, 1, start_time_item)
                 self.segment_table.setItem(row, 2, end_frame_item)
                 self.segment_table.setItem(row, 3, end_time_item)
-                self.segment_table.setItem(row, 4, mask_item)
-                self.segment_table.setItem(row, 5, id_item)
+                self.segment_table.setCellWidget(row, 4, self._build_mask_cell_widget(segment))
+                self.segment_table.setCellWidget(row, 5, self._build_remove_cell_widget(segment))
 
             if selected_segment_id is not None:
                 for idx, segment in enumerate(self.segments):
@@ -872,11 +1174,15 @@ class MainWindow(QMainWindow):
             self._error("lama-cleaner manager is not available.")
             return
         target = self.instance_spin.value()
+        self._show_loading_overlay(f"Applying instance count: {target}")
         try:
             self.lama_manager.set_instance_count(target)
             self._refresh_ports_label()
+            self._save_ui_settings()
         except Exception as exc:  # pylint: disable=broad-except
             self._error(str(exc))
+        finally:
+            self._hide_loading_overlay()
 
     def _refresh_ports_label(self) -> None:
         if self.lama_manager is None:
@@ -956,10 +1262,14 @@ class MainWindow(QMainWindow):
         if total <= 0:
             self.progress_bar.setValue(0)
             return
-        percent = int((done / total) * 100)
-        self.progress_bar.setValue(max(0, min(100, percent)))
+        if done >= total:
+            self.progress_bar.setValue(99)
+            return
+        percent = int((max(0, done) / total) * 99)
+        self.progress_bar.setValue(max(0, min(99, percent)))
 
     def _on_worker_success(self, output_path: str) -> None:
+        self.progress_bar.setValue(100)
         self.log(f"Processing completed successfully: {output_path}")
         self._set_running_ui(False)
 
@@ -976,6 +1286,7 @@ class MainWindow(QMainWindow):
         self.start_btn.setEnabled(not running)
         self.cancel_btn.setEnabled(running)
         self.instance_spin.setEnabled(not running)
+        self.add_segment_btn.setEnabled(not running)
         self.segment_table.setEnabled(not running)
         if not running:
             self.worker = None
@@ -1141,6 +1452,46 @@ class MainWindow(QMainWindow):
             step = 7
         self._step_frame(self._key_seek_direction, step)
 
+    def _extract_supported_path_from_event(self, event) -> Path | None:  # noqa: ANN001
+        mime = event.mimeData()
+        if not mime or not mime.hasUrls():
+            return None
+        for url in mime.urls():
+            if not url.isLocalFile():
+                continue
+            path = Path(url.toLocalFile())
+            if self._is_supported_video_file(path):
+                return path
+        return None
+
+    def _handle_drag_enter_or_move(self, event) -> bool:  # noqa: ANN001
+        path = self._extract_supported_path_from_event(event)
+        if path is None:
+            self._hide_drop_overlay()
+            event.ignore()
+            return False
+        self._show_drop_overlay()
+        event.acceptProposedAction()
+        return True
+
+    def _handle_drop(self, event) -> bool:  # noqa: ANN001
+        self._hide_drop_overlay()
+        path = self._extract_supported_path_from_event(event)
+        if path is None:
+            event.ignore()
+            return False
+        self._load_video_file(path)
+        event.acceptProposedAction()
+        return True
+
+    def _handle_drag_leave(self, event) -> None:  # noqa: ANN001
+        # Avoid flicker when drag target moves between child widgets inside this window.
+        if self.frameGeometry().contains(QCursor.pos()):
+            event.ignore()
+            return
+        self._hide_drop_overlay()
+        event.accept()
+
     def eventFilter(self, watched, event):  # noqa: ANN001
         if watched in (self.video_widget, self.timeline_slider):
             if event.type() == QEvent.MouseButtonPress:
@@ -1149,6 +1500,18 @@ class MainWindow(QMainWindow):
                 self.mask_state_badge.move(12, 12)
                 self._current_mask_overlay_key = None
                 self._update_mask_overlay(self._frame_from_ms(self.player.position()))
+            if watched is self.video_widget and event.type() == QEvent.DragEnter:
+                self._handle_drag_enter_or_move(event)
+                return True
+            if watched is self.video_widget and event.type() == QEvent.DragMove:
+                self._handle_drag_enter_or_move(event)
+                return True
+            if watched is self.video_widget and event.type() == QEvent.DragLeave:
+                self._handle_drag_leave(event)
+                return True
+            if watched is self.video_widget and event.type() == QEvent.Drop:
+                self._handle_drop(event)
+                return True
 
         if event.type() == QEvent.KeyPress:
             if not self._is_video_seek_context():
@@ -1176,26 +1539,29 @@ class MainWindow(QMainWindow):
 
         return super().eventFilter(watched, event)
 
+    @staticmethod
+    def _is_supported_video_file(path: Path) -> bool:
+        return path.suffix.lower() in {".mp4", ".mov", ".mkv", ".avi", ".webm"}
+
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        if event.mimeData().hasUrls():
-            for url in event.mimeData().urls():
-                if url.isLocalFile():
-                    suffix = Path(url.toLocalFile()).suffix.lower()
-                    if suffix in {".mp4", ".mov", ".mkv", ".avi", ".webm"}:
-                        event.acceptProposedAction()
-                        return
-        event.ignore()
+        self._handle_drag_enter_or_move(event)
+
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+        self._handle_drag_enter_or_move(event)
+
+    def dragLeaveEvent(self, event: QDragLeaveEvent) -> None:
+        self._handle_drag_leave(event)
 
     def dropEvent(self, event: QDropEvent) -> None:
-        for url in event.mimeData().urls():
-            if not url.isLocalFile():
-                continue
-            path = Path(url.toLocalFile())
-            if path.suffix.lower() in {".mp4", ".mov", ".mkv", ".avi", ".webm"}:
-                self._load_video_file(path)
-                event.acceptProposedAction()
-                return
-        event.ignore()
+        self._handle_drop(event)
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001
+        super().resizeEvent(event)
+        self._resize_overlays()
+
+    def moveEvent(self, event) -> None:  # noqa: ANN001
+        super().moveEvent(event)
+        self._resize_overlays()
 
     def log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -1216,6 +1582,8 @@ class MainWindow(QMainWindow):
                 return
             self.worker.request_cancel()
             self.worker.wait(10000)
+
+        self._save_ui_settings()
 
         if self.lama_manager is not None:
             try:

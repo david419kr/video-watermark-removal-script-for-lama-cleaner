@@ -49,11 +49,21 @@ class MaskCanvas(QWidget):
             resized = resized.scaled(
                 self.reference_image.size(),
                 Qt.IgnoreAspectRatio,
-                Qt.SmoothTransformation,
+                Qt.FastTransformation,
             )
-        painter = QPainter(self.mask_layer)
-        painter.drawImage(0, 0, resized)
-        painter.end()
+        self.mask_layer = self._threshold_image(resized)
+
+    @staticmethod
+    def _threshold_image(source: QImage, threshold: int = 127) -> QImage:
+        gray = source.convertToFormat(QImage.Format_Grayscale8)
+        mask = QImage(gray.size(), QImage.Format_Grayscale8)
+        black = QColor(0, 0, 0)
+        white = QColor(255, 255, 255)
+        for y in range(gray.height()):
+            for x in range(gray.width()):
+                value = gray.pixelColor(x, y).red()
+                mask.setPixelColor(x, y, white if value > threshold else black)
+        return mask
 
     def _target_rect(self) -> QRectF:
         iw = self.reference_image.width()
@@ -89,7 +99,7 @@ class MaskCanvas(QWidget):
 
         painter.drawImage(target, self.reference_image)
 
-        painter.setOpacity(0.55)
+        painter.setOpacity(0.8)
         painter.drawImage(target, self.mask_layer)
         painter.setOpacity(1.0)
 
@@ -214,11 +224,14 @@ class MaskCanvas(QWidget):
         self.update()
 
     def build_binary_mask(self) -> QImage:
-        mask = QImage(self.mask_layer.size(), QImage.Format_Grayscale8)
+        binary_gray = self._threshold_image(self.mask_layer)
+        mask = QImage(binary_gray.size(), QImage.Format_RGB32)
+        black = QColor(0, 0, 0)
+        white = QColor(255, 255, 255)
         for y in range(self.mask_layer.height()):
             for x in range(self.mask_layer.width()):
-                value = QColor.fromRgb(self.mask_layer.pixel(x, y)).red()
-                mask.setPixel(x, y, 255 if value > 127 else 0)
+                value = binary_gray.pixelColor(x, y).red()
+                mask.setPixelColor(x, y, white if value > 127 else black)
         return mask
 
 
