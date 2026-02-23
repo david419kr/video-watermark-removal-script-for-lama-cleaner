@@ -224,7 +224,7 @@ class MainWindow(QMainWindow):
     def __init__(self, repo_root: Path) -> None:
         super().__init__()
         self.setWindowTitle("Lama Cleaner Video GUI")
-        self.resize(1420, 960)
+        self.resize(1200, 960)
         self.setAcceptDrops(True)
 
         self.paths = Paths(repo_root)
@@ -547,6 +547,7 @@ class MainWindow(QMainWindow):
 
     def _build_segment_group(self) -> QGroupBox:
         box = QGroupBox("Segments and Masks")
+        box.setMinimumHeight(200)
         layout = QVBoxLayout()
 
         self.segment_table = QTableWidget(0, 6)
