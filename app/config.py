@@ -4,6 +4,7 @@ from pathlib import Path
 class AppConfig:
     BASE_PORT = 8080
     REQUEST_TIMEOUT_SECONDS = 600
+    LAMA_START_TIMEOUT_SECONDS = 180
     MAX_INSTANCE_COUNT = 8
     DEFAULT_INSTANCE_COUNT = 1
 

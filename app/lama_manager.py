@@ -41,9 +41,16 @@ class LamaCleanerManager:
 
     @staticmethod
     def _is_port_open(port: int) -> bool:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(0.25)
-            return sock.connect_ex(("127.0.0.1", port)) == 0
+        addresses = [("127.0.0.1", socket.AF_INET), ("::1", socket.AF_INET6)]
+        for host, family in addresses:
+            try:
+                with socket.socket(family, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(0.25)
+                    if sock.connect_ex((host, port)) == 0:
+                        return True
+            except OSError:
+                continue
+        return False
 
     @staticmethod
     def _is_port_free(port: int) -> bool:
@@ -104,7 +111,12 @@ class LamaCleanerManager:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
 
-        started = self._wait_for_port(port, timeout_sec=15)
+        started = self._wait_for_port(
+            port=port,
+            process=process,
+            timeout_sec=AppConfig.LAMA_START_TIMEOUT_SECONDS,
+            log_path=log_path,
+        )
         if not started:
             process.terminate()
             try:
@@ -134,12 +146,37 @@ class LamaCleanerManager:
             return ""
         return "Last log lines:\n" + "\n".join(tail)
 
-    def _wait_for_port(self, port: int, timeout_sec: float) -> bool:
+    @staticmethod
+    def _is_ready_log_emitted(path: Path) -> bool:
+        if not path.exists():
+            return False
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return False
+        markers = (
+            "Press CTRL+C to quit",
+            "Running on http://",
+            "Uvicorn running on",
+        )
+        return any(marker in text for marker in markers)
+
+    def _wait_for_port(
+        self,
+        port: int,
+        process: subprocess.Popen,
+        timeout_sec: float,
+        log_path: Path,
+    ) -> bool:
         start = time.time()
         while time.time() - start <= timeout_sec:
+            if process.poll() is not None:
+                return False
             if self._is_port_open(port):
                 return True
             time.sleep(0.2)
+        if process.poll() is None and self._is_ready_log_emitted(log_path):
+            return True
         return False
 
     def _stop_instance(self, inst: ManagedInstance) -> None:

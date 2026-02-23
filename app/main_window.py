@@ -777,7 +777,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # pylint: disable=broad-except
             self._error(
                 "Failed to start lama-cleaner automatically.\n"
-                f"{exc}\n\nEnsure lama-cleaner is available, then reopen the GUI."
+                f"{exc}\n\nOn first launch, model initialization can take a while. "
+                "If this keeps happening, check workspace/lama_logs/*.log and reopen the GUI."
             )
         finally:
             self._hide_loading_overlay()
