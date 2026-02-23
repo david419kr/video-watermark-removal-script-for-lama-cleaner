@@ -7,3 +7,4 @@
 *.aac
 temp/
 .runtime/
+.release/
