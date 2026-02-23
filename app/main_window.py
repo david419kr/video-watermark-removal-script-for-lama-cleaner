@@ -190,9 +190,9 @@ class BlockingOverlay(QFrame):
 class ProcessingWorker(QThread):
     log_message = Signal(str)
     progress_update = Signal(int, int)
-    run_success = Signal(str)
+    run_success = Signal(str, str)
     run_error = Signal(str)
-    run_cancelled = Signal()
+    run_cancelled = Signal(str)
 
     def __init__(self, paths: Paths, config: ProcessConfig) -> None:
         super().__init__()
@@ -212,9 +212,9 @@ class ProcessingWorker(QThread):
         )
         try:
             output_path = pipeline.run(self.config)
-            self.run_success.emit(str(output_path))
+            self.run_success.emit(str(output_path), str(pipeline.current_job_root or ""))
         except PipelineCancelled:
-            self.run_cancelled.emit()
+            self.run_cancelled.emit(str(pipeline.current_job_root or ""))
         except Exception as exc:  # pylint: disable=broad-except
             detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
             self.run_error.emit(detail)
@@ -252,6 +252,10 @@ class MainWindow(QMainWindow):
 
         self.lama_manager: LamaCleanerManager | None = None
         self._lama_init_pending = True
+        self._paused_process_config: ProcessConfig | None = None
+        self._active_process_config: ProcessConfig | None = None
+        self._pause_requested = False
+        self._cancel_requested = False
 
         self._build_ui()
         self._pencil_icon = self._create_pencil_icon()
@@ -393,6 +397,115 @@ class MainWindow(QMainWindow):
             path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
         except Exception as exc:  # pylint: disable=broad-except
             self.log(f"Failed to save UI settings: {exc}")
+
+    def _paused_state_path(self) -> Path:
+        return self.paths.paused_job_state
+
+    @staticmethod
+    def _segment_to_dict(segment: Segment) -> dict:
+        return {
+            "start_frame": int(segment.start_frame),
+            "end_frame": int(segment.end_frame),
+            "mask_path": str(segment.mask_path) if segment.mask_path else None,
+            "segment_id": segment.segment_id,
+        }
+
+    @staticmethod
+    def _segment_from_dict(payload: dict) -> Segment:
+        segment = Segment(
+            start_frame=int(payload["start_frame"]),
+            end_frame=int(payload["end_frame"]),
+            mask_path=Path(payload["mask_path"]) if payload.get("mask_path") else None,
+            segment_id=str(payload.get("segment_id") or ""),
+        )
+        if not segment.segment_id:
+            segment.segment_id = Segment(start_frame=1, end_frame=1).segment_id
+        segment.validate()
+        return segment
+
+    def _save_paused_process_state(self, config: ProcessConfig) -> None:
+        if config.resume_job_root is None:
+            return
+        payload = {
+            "job_root": str(config.resume_job_root),
+            "video_path": str(config.video_path),
+            "output_path": str(config.output_path),
+            "keep_temp": bool(config.keep_temp),
+            "segments": [self._segment_to_dict(seg) for seg in config.segments],
+        }
+        path = self._paused_state_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+        except Exception as exc:  # pylint: disable=broad-except
+            self.log(f"Failed to save paused job state: {exc}")
+
+    def _clear_paused_process_state(self) -> None:
+        path = self._paused_state_path()
+        try:
+            if path.exists():
+                path.unlink()
+        except Exception as exc:  # pylint: disable=broad-except
+            self.log(f"Failed to clear paused job state: {exc}")
+
+    def _estimate_paused_progress(self, job_root: Path | None) -> int:
+        if job_root is None:
+            return 0
+        input_dir = job_root / "input"
+        output_dir = job_root / "output"
+        if not input_dir.exists() or not output_dir.exists():
+            return 0
+
+        input_frames = [p for p in input_dir.iterdir() if p.is_file() and p.stem.isdigit()]
+        if not input_frames:
+            return 0
+        output_frames = [p for p in output_dir.iterdir() if p.is_file() and p.stem.isdigit() and p.stat().st_size > 0]
+        total = len(input_frames)
+        done = min(total, len(output_frames))
+        return int((done / total) * 99)
+
+    def _restore_paused_process_if_exists(self) -> None:
+        path = self._paused_state_path()
+        if not path.exists():
+            self._set_running_ui(False)
+            return
+
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            job_root = Path(payload["job_root"])
+            video_path = Path(payload["video_path"])
+            output_path = Path(payload["output_path"])
+            keep_temp = bool(payload.get("keep_temp", False))
+            segments_payload = payload.get("segments", [])
+            segments = [self._segment_from_dict(item) for item in segments_payload]
+        except Exception as exc:  # pylint: disable=broad-except
+            self.log(f"Invalid paused job state file. Clearing it: {exc}")
+            self._clear_paused_process_state()
+            self._set_running_ui(False)
+            return
+
+        if not job_root.exists() or not video_path.exists():
+            self.log("Paused job folder or source video no longer exists. Clearing paused state.")
+            self._clear_paused_process_state()
+            self._set_running_ui(False)
+            return
+
+        self._paused_process_config = ProcessConfig(
+            video_path=video_path,
+            output_path=output_path,
+            segments=segments,
+            lama_ports=[],
+            keep_temp=keep_temp,
+            resume_job_root=job_root,
+        )
+        self.segments = list(segments)
+        self.output_path_edit.setText(str(output_path))
+        self.keep_temp_box.setChecked(keep_temp)
+        self._load_video_file(video_path, keep_paused_state=True)
+        self._refresh_segment_table()
+        self.progress_bar.setValue(self._estimate_paused_progress(job_root))
+        self.log(f"Paused job restored: {job_root}")
+        self._set_running_ui(False)
 
     def _build_io_group(self) -> QGroupBox:
         box = QGroupBox("Input / Output")
@@ -637,6 +750,7 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         if self._lama_init_pending:
             self._lama_init_pending = False
+            QTimer.singleShot(0, self._restore_paused_process_if_exists)
             QTimer.singleShot(0, self._init_lama_manager)
 
     def _init_lama_manager(self) -> None:
@@ -679,7 +793,10 @@ class MainWindow(QMainWindow):
             return
         self._load_video_file(Path(file_path))
 
-    def _load_video_file(self, video_path: Path) -> None:
+    def _load_video_file(self, video_path: Path, *, keep_paused_state: bool = False) -> None:
+        if not keep_paused_state and self._paused_process_config is not None:
+            self._paused_process_config = None
+            self._clear_paused_process_state()
         self._show_loading_overlay(f"Loading video: {video_path.name}")
         try:
             self.video_path_edit.setText(str(video_path))
@@ -724,6 +841,8 @@ class MainWindow(QMainWindow):
         self.timeline_slider.setValue(0)
         self.timeline_slider.set_segment_data(self.segments, self.video_info.total_frames)
         self._update_mask_visuals(1)
+        if not keep_paused_state:
+            self._set_running_ui(False)
     def _browse_output(self) -> None:
         file_path, _ = QFileDialog.getSaveFileName(
             self,
@@ -1196,6 +1315,17 @@ class MainWindow(QMainWindow):
 
     def _start_processing(self) -> None:
         if self.worker is not None and self.worker.isRunning():
+            self._pause_processing()
+            return
+
+        if self._paused_process_config is not None:
+            self._resume_paused_processing()
+            return
+
+        self._start_new_processing()
+
+    def _start_new_processing(self) -> None:
+        if self.worker is not None and self.worker.isRunning():
             self._error("Processing is already running.")
             return
 
@@ -1240,8 +1370,37 @@ class MainWindow(QMainWindow):
             segments=list(self.segments),
             lama_ports=ports,
             keep_temp=self.keep_temp_box.isChecked(),
+            resume_job_root=None,
         )
 
+        self._launch_processing_worker(config, "Processing started.")
+
+    def _resume_paused_processing(self) -> None:
+        if self._paused_process_config is None:
+            return
+        if self.lama_manager is None:
+            self._error("lama-cleaner manager is not available.")
+            return
+
+        ports = self.lama_manager.get_ports()
+        if not ports:
+            self._error("No lama-cleaner instances running. Apply instance count first.")
+            return
+
+        config = ProcessConfig(
+            video_path=self._paused_process_config.video_path,
+            output_path=self._paused_process_config.output_path,
+            segments=list(self._paused_process_config.segments),
+            lama_ports=ports,
+            keep_temp=self._paused_process_config.keep_temp,
+            resume_job_root=self._paused_process_config.resume_job_root,
+        )
+        self._launch_processing_worker(config, f"Resuming paused job: {config.resume_job_root}")
+
+    def _launch_processing_worker(self, config: ProcessConfig, log_message: str) -> None:
+        self._pause_requested = False
+        self._cancel_requested = False
+        self._active_process_config = config
         self.worker = ProcessingWorker(paths=self.paths, config=config)
         self.worker.log_message.connect(self.log)
         self.worker.progress_update.connect(self._on_worker_progress)
@@ -1250,12 +1409,25 @@ class MainWindow(QMainWindow):
         self.worker.run_cancelled.connect(self._on_worker_cancelled)
 
         self._set_running_ui(True)
-        self.progress_bar.setValue(0)
-        self.log("Processing started.")
+        self.progress_bar.setValue(self._estimate_paused_progress(config.resume_job_root) if config.resume_job_root else 0)
+        self.log(log_message)
         self.worker.start()
+
+    def _pause_processing(self) -> None:
+        if self.worker is None or not self.worker.isRunning():
+            return
+        self._pause_requested = True
+        self._cancel_requested = False
+        self.start_btn.setEnabled(False)
+        self.start_btn.setText("Pausing...")
+        self.worker.request_cancel()
+        self.log("Pause requested. Finishing in-flight frame requests...")
 
     def _cancel_processing(self) -> None:
         if self.worker is not None and self.worker.isRunning():
+            self._pause_requested = False
+            self._cancel_requested = True
+            self.cancel_btn.setEnabled(False)
             self.worker.request_cancel()
             self.log("Cancellation requested...")
 
@@ -1269,22 +1441,55 @@ class MainWindow(QMainWindow):
         percent = int((max(0, done) / total) * 99)
         self.progress_bar.setValue(max(0, min(99, percent)))
 
-    def _on_worker_success(self, output_path: str) -> None:
+    def _on_worker_success(self, output_path: str, job_root: str) -> None:
+        _ = job_root
+        self._paused_process_config = None
+        self._active_process_config = None
+        self._clear_paused_process_state()
         self.progress_bar.setValue(100)
         self.log(f"Processing completed successfully: {output_path}")
         self._set_running_ui(False)
 
     def _on_worker_error(self, message: str) -> None:
+        self._pause_requested = False
+        self._cancel_requested = False
+        self._active_process_config = None
         self.log(f"Processing failed: {message}")
         self._error(message)
         self._set_running_ui(False)
 
-    def _on_worker_cancelled(self) -> None:
-        self.log("Processing cancelled.")
+    def _on_worker_cancelled(self, job_root: str) -> None:
+        if self._pause_requested:
+            self._pause_requested = False
+            self._cancel_requested = False
+            if self._active_process_config is not None and job_root:
+                paused_cfg = ProcessConfig(
+                    video_path=self._active_process_config.video_path,
+                    output_path=self._active_process_config.output_path,
+                    segments=list(self._active_process_config.segments),
+                    lama_ports=[],
+                    keep_temp=self._active_process_config.keep_temp,
+                    resume_job_root=Path(job_root),
+                )
+                self._paused_process_config = paused_cfg
+                self._save_paused_process_state(paused_cfg)
+                self.progress_bar.setValue(self._estimate_paused_progress(paused_cfg.resume_job_root))
+                self.log(f"Processing paused at job: {job_root}")
+            else:
+                self.log("Pause requested but no resumable job info was produced.")
+        else:
+            self._pause_requested = False
+            self._cancel_requested = False
+            self._paused_process_config = None
+            self._clear_paused_process_state()
+            self.log("Processing cancelled.")
+
+        self._active_process_config = None
         self._set_running_ui(False)
 
     def _set_running_ui(self, running: bool) -> None:
-        self.start_btn.setEnabled(not running)
+        self.start_btn.setEnabled(True)
+        self.start_btn.setText("Pause Processing" if running else ("Resume Processing" if self._paused_process_config else "Start Processing"))
         self.cancel_btn.setEnabled(running)
         self.instance_spin.setEnabled(not running)
         self.add_segment_btn.setEnabled(not running)

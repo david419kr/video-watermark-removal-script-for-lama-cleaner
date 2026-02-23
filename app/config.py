@@ -22,6 +22,7 @@ class Paths:
         self.workspace_jobs = self.workspace_root / "jobs"
         self.workspace_masks = self.workspace_root / "masks"
         self.ui_settings = self.workspace_root / "ui_settings.json"
+        self.paused_job_state = self.workspace_root / "paused_job.json"
 
         self.local_python = repo_root / ".runtime" / "python310" / "python.exe"
         self.local_lama = repo_root / ".runtime" / "python310" / "Scripts" / "lama-cleaner.exe"

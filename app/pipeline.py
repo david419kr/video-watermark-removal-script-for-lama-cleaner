@@ -74,6 +74,7 @@ class VideoProcessingPipeline:
         self._progress_lock = threading.Lock()
         self._done_count = 0
         self._total_count = 0
+        self.current_job_root: Path | None = None
 
     def run(self, config: ProcessConfig) -> Path:
         self._ensure_preconditions(config)
@@ -87,13 +88,18 @@ class VideoProcessingPipeline:
         )
         self._validate_segments(config.segments, video_info.total_frames)
 
-        job_root = self._prepare_job_folder()
+        job_root = self._resolve_job_folder(config)
+        self.current_job_root = job_root
         input_dir = job_root / "input"
         output_dir = job_root / "output"
         input_dir.mkdir(parents=True, exist_ok=True)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        self._extract_frames(config.video_path, input_dir)
+        existing_input_frames = self._collect_frames(input_dir)
+        if existing_input_frames:
+            self.log(f"Resuming existing job folder: {job_root}")
+        else:
+            self._extract_frames(config.video_path, input_dir)
         self._check_cancelled()
 
         frame_files = self._collect_frames(input_dir)
@@ -104,15 +110,15 @@ class VideoProcessingPipeline:
         self._done_count = 0
         self.progress(0, self._total_count)
 
-        masked_tasks, copied_count = self._prepare_tasks(
+        masked_tasks, already_done = self._prepare_tasks(
             frame_files=frame_files,
             output_dir=output_dir,
             segments=config.segments,
         )
-        self._update_progress_bulk(copied_count)
+        self._update_progress_bulk(already_done)
         self.log(
             f"Frame dispatch: total={len(frame_files)}, "
-            f"masked={len(masked_tasks)}, copied={copied_count}"
+            f"masked={len(masked_tasks)}, already_done={already_done}"
         )
 
         if masked_tasks:
@@ -134,6 +140,14 @@ class VideoProcessingPipeline:
             self.log(f"Temporary job folder kept: {job_root}")
 
         return config.output_path
+
+    def _resolve_job_folder(self, config: ProcessConfig) -> Path:
+        if config.resume_job_root is not None:
+            job_root = config.resume_job_root
+            if not job_root.exists():
+                raise FileNotFoundError(f"Resume job folder not found: {job_root}")
+            return job_root
+        return self._prepare_job_folder()
 
     def _ensure_preconditions(self, config: ProcessConfig) -> None:
         if not self.paths.ffmpeg.exists():
@@ -209,7 +223,7 @@ class VideoProcessingPipeline:
         segments: list[Segment],
     ) -> tuple[list[tuple[Path, Path, Path]], int]:
         masked_tasks: list[tuple[Path, Path, Path]] = []
-        copied_count = 0
+        done_count = 0
 
         sorted_segments = sorted(segments, key=lambda seg: seg.start_frame)
 
@@ -221,13 +235,17 @@ class VideoProcessingPipeline:
             mask_path = self._mask_for_frame(index, sorted_segments)
             output_path = output_dir / frame_path.name
 
+            if output_path.exists() and output_path.stat().st_size > 0:
+                done_count += 1
+                continue
+
             if mask_path is None:
                 shutil.copy2(frame_path, output_path)
-                copied_count += 1
+                done_count += 1
             else:
                 masked_tasks.append((frame_path, output_path, mask_path))
 
-        return masked_tasks, copied_count
+        return masked_tasks, done_count
 
     @staticmethod
     def _mask_for_frame(frame_index: int, segments: list[Segment]) -> Optional[Path]:
@@ -253,6 +271,7 @@ class VideoProcessingPipeline:
 
         mask_cache: dict[Path, bytes] = {}
         errors: list[str] = []
+        cancelled = False
 
         with ThreadPoolExecutor(max_workers=len(lama_ports)) as executor:
             future_map = {}
@@ -273,8 +292,15 @@ class VideoProcessingPipeline:
                 worker_id, port = future_map[future]
                 try:
                     future.result()
+                except PipelineCancelled:
+                    cancelled = True
                 except Exception as exc:
                     errors.append(f"worker {worker_id} (port {port}): {exc}")
+
+        if cancelled:
+            # Preserve cancellation semantics so UI handles pause/cancel without error popup.
+            self._check_cancelled()
+            raise PipelineCancelled("Operation cancelled by user.")
 
         if errors:
             message = "\n".join(errors)

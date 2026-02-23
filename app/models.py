@@ -36,3 +36,4 @@ class ProcessConfig:
     segments: list[Segment]
     lama_ports: list[int]
     keep_temp: bool = False
+    resume_job_root: Optional[Path] = None
