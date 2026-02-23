@@ -8,10 +8,9 @@ Native Windows GUI for segment-based video watermark/object removal using `lama-
 
 This repository is now GUI-first. Legacy batch/PowerShell pipeline flow is not used.
 
-## Highlights
+<img width="1202" height="1070" alt="image" src="https://github.com/user-attachments/assets/819e5d1e-204e-4dec-a9ee-a75845707623" />
 
-- Native desktop app (`PySide6`)
-- Drag-and-drop video loading plus file picker
+## Highlights
 - Frame-accurate timeline workflow
   - left/right key frame stepping
   - held key = accelerated stepping
@@ -20,21 +19,14 @@ This repository is now GUI-first. Legacy batch/PowerShell pipeline flow is not u
 - Per-segment mask workflow
   - assign external mask file
   - draw mask in built-in mask editor (brush, eraser, rectangle, ellipse)
-- Visual mask feedback in preview
-  - timeline segment coloring
-  - mask-active badge + red overlay
 - Multi-instance `lama-cleaner` orchestration from GUI (base port `8080`, sequential)
 - Pause/Resume processing with persisted job state
-- GPU-accelerated ffmpeg path when available (CUDA decode, NVENC encode fallback to CPU)
 
 ## System Requirements
 
 - Windows 10/11 (x64)
 - NVIDIA GPU + CUDA-capable driver (required for `--device=cuda`)
 - Internet access on first setup (Python/pip/packages/model download)
-- FFmpeg binaries at:
-  - `ffmpeg/bin/ffmpeg.exe`
-  - `ffmpeg/bin/ffprobe.exe`
 
 ## Quick Start
 
@@ -94,9 +86,6 @@ If runtime is already valid, installation is skipped.
   - in-flight requests are allowed to finish safely
   - resumable job state is saved to `workspace/paused_job.json`
   - next app launch auto-restores paused job and button becomes `Resume Processing`
-- Progress bar behavior:
-  - up to `99%` during frame cleaning
-  - `100%` only after merge/final output is complete
 
 ## Multi-Instance Behavior
 
