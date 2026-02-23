@@ -17,7 +17,7 @@ IF "%video_resolution%"=="%mask_resolution%" (
 
   if not defined lama_instance_count (
     echo Failed to detect running lama-cleaner instances.
-    echo Please run .\run-lama-cleaner.bat first.
+    echo Please run .\1.start-lama-cleaner.bat first.
     goto NO
   )
 
@@ -28,7 +28,7 @@ IF "%video_resolution%"=="%mask_resolution%" (
 
   IF !lama_instance_count! LSS 1 (
     echo No running lama-cleaner instance detected from port %LAMA_BASE_PORT%.
-    echo Please run .\run-lama-cleaner.bat first.
+    echo Please run .\1.start-lama-cleaner.bat first.
     goto NO
   )
 
