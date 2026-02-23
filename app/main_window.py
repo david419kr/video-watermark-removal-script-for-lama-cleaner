@@ -304,7 +304,7 @@ class MainWindow(QMainWindow):
             self.log(f"Failed to initialize lama manager: {exc}")
             self._error(
                 "Failed to initialize lama-cleaner manager.\n"
-                f"{exc}\n\nRun 1.start-lama-cleaner.bat first, then restart this GUI."
+                f"{exc}\n\nPrepare lama-cleaner in this environment, then restart the GUI."
             )
             return
         self._auto_start_lama()
@@ -318,7 +318,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # pylint: disable=broad-except
             self._error(
                 "Failed to start lama-cleaner automatically.\n"
-                f"{exc}\n\nRun 1.start-lama-cleaner.bat once if runtime is not ready."
+                f"{exc}\n\nEnsure lama-cleaner is available, then reopen the GUI."
             )
 
     def _browse_video(self) -> None:

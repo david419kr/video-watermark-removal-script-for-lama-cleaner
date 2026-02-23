@@ -32,7 +32,8 @@ class LamaCleanerManager:
             return Path(from_path)
         raise FileNotFoundError(
             "lama-cleaner executable was not found. "
-            "Run '1.start-lama-cleaner.bat' first or install lama-cleaner in PATH."
+            "Install lama-cleaner in your current environment "
+            "or provide it via .runtime/python310/Scripts."
         )
 
     @staticmethod

@@ -8,3 +8,7 @@
 temp/
 .runtime/
 .release/
+__pycache__/
+workspace/jobs/
+workspace/masks/ref-*.jpg
+workspace/masks/mask-*.png

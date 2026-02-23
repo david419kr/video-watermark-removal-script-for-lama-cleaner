@@ -1,8 +1,7 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
-cd /d "%~dp0\.."
+cd /d "%~dp0"
 
-set "GUI_DIR=%CD%\gui_app"
 set "PYTHON_EXE=%CD%\.runtime\python310\python.exe"
 
 if not exist "%PYTHON_EXE%" (
@@ -10,11 +9,11 @@ if not exist "%PYTHON_EXE%" (
 )
 
 echo Using Python: %PYTHON_EXE%
-"%PYTHON_EXE%" -m pip install -r "%GUI_DIR%\requirements.txt"
+"%PYTHON_EXE%" -m pip install -r "%CD%\requirements.txt"
 if errorlevel 1 (
   echo Failed to install GUI requirements.
   exit /b 1
 )
 
-"%PYTHON_EXE%" "%GUI_DIR%\main.py"
+"%PYTHON_EXE%" "%CD%\main.py"
 exit /b %errorlevel%

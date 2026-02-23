@@ -18,7 +18,7 @@ class Paths:
         self.ffmpeg = repo_root / "ffmpeg" / "bin" / "ffmpeg.exe"
         self.ffprobe = repo_root / "ffmpeg" / "bin" / "ffprobe.exe"
 
-        self.workspace_root = repo_root / "gui_app" / "workspace"
+        self.workspace_root = repo_root / "workspace"
         self.workspace_jobs = self.workspace_root / "jobs"
         self.workspace_masks = self.workspace_root / "masks"
 
