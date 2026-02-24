@@ -8,7 +8,7 @@ Release에서 받으세요: [GUI Release ZIP](https://github.com/david419kr/lama
 
 현재 리포지토리는 GUI 중심이며, 기존 배치/PowerShell 파이프라인 방식은 사용하지 않습니다.
 
-<img width="1202" height="1070" alt="image" src="https://github.com/user-attachments/assets/819e5d1e-204e-4dec-a9ee-a75845707623" />
+<img width="1185" height="1100" alt="image" src="https://github.com/user-attachments/assets/fb17ddd6-9356-4db7-bfb0-43568aedce69" />
 
 ## 주요 기능
 
