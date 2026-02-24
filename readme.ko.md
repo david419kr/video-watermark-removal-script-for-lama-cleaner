@@ -33,11 +33,26 @@
 
 ## 빠른 시작
 
-리포지토리 루트에서 실행:
+아래 방법 중 하나로 파일을 준비한 뒤 `start_gui.bat`를 실행하세요.
+어떤 방법으로 받아도 실행 결과와 기능 차이는 없습니다.
+
+1. Git clone
 
 ```bat
+git clone https://github.com/david419kr/lama-cleaner-video-gui.git
+cd lama-cleaner-video-gui
 start_gui.bat
 ```
+
+2. 소스 ZIP 다운로드
+
+- https://github.com/david419kr/lama-cleaner-video-gui/archive/refs/heads/main.zip
+- ZIP 압축 해제 후 폴더를 열고 `start_gui.bat` 실행
+
+3. GUI Release 0.1.1 ZIP 다운로드 (초기 구동 필수 파일 패키지)
+
+- https://github.com/david419kr/lama-cleaner-video-gui/releases/download/v0.1.1/lama-cleaner-video-gui-0.1.1.zip
+- ZIP 압축 해제 후 폴더를 열고 `start_gui.bat` 실행
 
 ## GUI 사용 순서
 
@@ -129,4 +144,10 @@ start_gui.bat
 2. `.runtime/` 삭제
 3. `workspace/` 삭제
 4. `start_gui.bat` 재실행
+
+
+
+
+
+
 

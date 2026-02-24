@@ -31,11 +31,26 @@ This repository is now GUI-first. Legacy batch/PowerShell pipeline flow is not u
 
 ## Quick Start
 
-From repo root:
+Choose one download path, then run `start_gui.bat`.
+All methods run the same app with no functional differences.
+
+1. Clone repository
 
 ```bat
+git clone https://github.com/david419kr/lama-cleaner-video-gui.git
+cd lama-cleaner-video-gui
 start_gui.bat
 ```
+
+2. Download source ZIP
+
+- https://github.com/david419kr/lama-cleaner-video-gui/archive/refs/heads/main.zip
+- Extract the ZIP, open the extracted folder, run `start_gui.bat`.
+
+3. Download GUI Release 0.1.1 (prepackaged startup files)
+
+- https://github.com/david419kr/lama-cleaner-video-gui/releases/download/v0.1.1/lama-cleaner-video-gui-0.1.1.zip
+- Extract the ZIP, open the extracted folder, run `start_gui.bat`.
 
 ## GUI Workflow
 
@@ -127,4 +142,10 @@ To fully reset local runtime and job state:
 2. Delete `.runtime/`
 3. Delete `workspace/`
 4. Run `start_gui.bat` again
+
+
+
+
+
+
 
