@@ -16,6 +16,13 @@ set "PYTHON_ZIP_PATH=%DOWNLOAD_DIR%\%PYTHON_EMBED_ZIP%"
 set "GET_PIP_URL=https://bootstrap.pypa.io/get-pip.py"
 set "GET_PIP_PATH=%DOWNLOAD_DIR%\get-pip.py"
 
+set "TORCH_VERSION=2.10.0"
+set "TORCHVISION_VERSION=0.25.0"
+set "TORCHAUDIO_VERSION=2.10.0"
+set "TORCH_CUDA_PREFIX=12.8"
+set "LAMA_CLEANER_VERSION=1.2.5"
+set "HF_HUB_VERSION=0.14.1"
+
 call :ensure_embedded_python
 if errorlevel 1 goto :setup_fail
 
@@ -105,21 +112,21 @@ if not errorlevel 1 (
 )
 
 echo Installing CUDA torch packages...
-"%PYTHON_EXE%" -m pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu128
+"%PYTHON_EXE%" -m pip install --no-cache-dir --force-reinstall torch==%TORCH_VERSION% torchvision==%TORCHVISION_VERSION% torchaudio==%TORCHAUDIO_VERSION% --index-url https://download.pytorch.org/whl/cu128
 if errorlevel 1 (
   echo Failed to install torch CUDA packages.
   exit /b 1
 )
 
-echo Installing lama-cleaner...
-"%PYTHON_EXE%" -m pip install lama-cleaner
+echo Installing lama-cleaner %LAMA_CLEANER_VERSION%...
+"%PYTHON_EXE%" -m pip install --no-cache-dir --force-reinstall lama-cleaner==%LAMA_CLEANER_VERSION%
 if errorlevel 1 (
   echo Failed to install lama-cleaner.
   exit /b 1
 )
 
-echo Pinning huggingface_hub==0.14.1 for lama-cleaner compatibility...
-"%PYTHON_EXE%" -m pip install --force-reinstall --no-deps huggingface_hub==0.14.1
+echo Pinning huggingface_hub==%HF_HUB_VERSION% for lama-cleaner compatibility...
+"%PYTHON_EXE%" -m pip install --no-cache-dir --force-reinstall --no-deps huggingface_hub==%HF_HUB_VERSION%
 if errorlevel 1 (
   echo Failed to install huggingface_hub.
   exit /b 1
@@ -128,17 +135,16 @@ if errorlevel 1 (
 call :is_lama_ready
 if errorlevel 1 (
   echo lama-cleaner dependency validation failed after install.
+  call :print_lama_validation_details
   exit /b 1
 )
 
 exit /b 0
 
 :is_lama_ready
-"%PYTHON_EXE%" -c "import importlib.metadata as m, importlib.util as u, sys; req=[('torch','2.10.0'),('torchvision','0.25.0'),('torchaudio','2.10.0'),('huggingface_hub','0.14.1'),('lama-cleaner',None)]; ok=(u.find_spec('lama_cleaner') is not None) and all(((m.version(p).startswith(v)) if v else True) for p,v in req); import torch; from huggingface_hub import cached_download; ok=ok and ((torch.version.cuda or '').startswith('12.8')); sys.exit(0 if ok else 1)" >nul 2>&1
+"%PYTHON_EXE%" -c "import importlib.metadata as m, importlib.util as u, sys, torch; req=[('torch','%TORCH_VERSION%'),('torchvision','%TORCHVISION_VERSION%'),('torchaudio','%TORCHAUDIO_VERSION%'),('huggingface_hub','%HF_HUB_VERSION%'),('lama-cleaner','%LAMA_CLEANER_VERSION%')]; ok=(u.find_spec('lama_cleaner') is not None) and all(m.version(p).startswith(v) for p,v in req); cuda=(torch.version.cuda or ''); tver=getattr(torch,'__version__',''); ok=ok and (cuda.startswith('%TORCH_CUDA_PREFIX%') or ('+cu128' in tver)); sys.exit(0 if ok else 1)" >nul 2>&1
 if errorlevel 1 exit /b 1
 
-"%PYTHON_EXE%" -c "import sys; from lama_cleaner import entry_point; sys.argv=['lama-cleaner','--help']; entry_point()" >nul 2>&1
-if errorlevel 1 exit /b 1
 exit /b 0
 
 :verify_lama_cleaner
@@ -146,15 +152,29 @@ echo Verifying lama-cleaner...
 call :is_lama_ready
 if errorlevel 1 (
   echo lama-cleaner verification failed.
+  call :print_lama_validation_details
   exit /b 1
 )
 
-"%PYTHON_EXE%" -c "import sys; from lama_cleaner import entry_point; sys.argv=['lama-cleaner','--help']; entry_point()" >nul 2>&1
+"%PYTHON_EXE%" -c "import sys; from lama_cleaner import entry_point; sys.exit(0 if callable(entry_point) else 1)" >nul 2>&1
 if errorlevel 1 (
   echo lama-cleaner module command check failed.
+  call :print_lama_validation_details
   exit /b 1
 )
 echo lama-cleaner verification completed.
+exit /b 0
+
+:print_lama_validation_details
+echo Validation details:
+"%PYTHON_EXE%" -m pip show torch torchvision torchaudio lama-cleaner huggingface_hub
+"%PYTHON_EXE%" -c "import torch; print('torch.__version__=' + str(torch.__version__)); print('torch.version.cuda=' + str(torch.version.cuda))"
+"%PYTHON_EXE%" -c "import sys; from lama_cleaner import entry_point; sys.argv=['lama-cleaner','--help']; entry_point()" >nul 2>&1
+if errorlevel 1 (
+  echo lama-cleaner entry-point check: FAILED
+) else (
+  echo lama-cleaner entry-point check: OK
+)
 exit /b 0
 
 :download_file
@@ -175,4 +195,3 @@ exit /b 0
 :setup_fail
 echo Setup failed.
 exit /b 1
-
