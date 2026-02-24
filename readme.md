@@ -9,7 +9,7 @@ Native Windows GUI for segment-based video watermark/object removal using `lama-
 
 This repository is now GUI-first. Legacy batch/PowerShell pipeline flow is not used.
 
-<img width="1202" height="1070" alt="image" src="https://github.com/user-attachments/assets/819e5d1e-204e-4dec-a9ee-a75845707623" />
+<img width="1185" height="1100" alt="image" src="https://github.com/user-attachments/assets/fb17ddd6-9356-4db7-bfb0-43568aedce69" />
 
 ## Highlights
 - Frame-accurate timeline workflow
