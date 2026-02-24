@@ -81,23 +81,42 @@ class LamaCleanerManager:
         self._log = log_fn
         self._conflict_resolver = conflict_resolver
         self._instances: list[ManagedInstance] = []
-        self._lama_exe = self._resolve_lama_executable()
+        self._lama_command = self._resolve_lama_command()
         self._logs_dir = self._paths.workspace_root / "lama_logs"
         self._logs_dir.mkdir(parents=True, exist_ok=True)
         self._kernel32 = None
         self._job_handle = None
         self._init_process_job()
 
-    def _resolve_lama_executable(self) -> Path:
+    def _local_lama_module_available(self) -> bool:
+        if not self._paths.local_python.exists():
+            return False
+        result = subprocess.run(
+            [
+                str(self._paths.local_python),
+                "-c",
+                "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('lama_cleaner') else 1)",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        return result.returncode == 0
+
+    def _resolve_lama_command(self) -> list[str]:
+        if self._local_lama_module_available():
+            return [str(self._paths.local_python), "-c", "import sys; from lama_cleaner import entry_point; sys.argv[0]='lama-cleaner'; entry_point()"]
         if self._paths.local_lama.exists():
-            return self._paths.local_lama
+            return [str(self._paths.local_lama)]
         from_path = shutil.which("lama-cleaner")
         if from_path:
-            return Path(from_path)
+            return [str(from_path)]
         raise FileNotFoundError(
-            "lama-cleaner executable was not found. "
+            "lama-cleaner runtime command was not found. "
             "Install lama-cleaner in your current environment "
-            "or provide it via .runtime/python310/Scripts."
+            "or provide a local .runtime/python310 runtime."
         )
 
     def _init_process_job(self) -> None:
@@ -358,7 +377,7 @@ class LamaCleanerManager:
         self._handle_port_conflict_if_needed(port)
 
         command = [
-            str(self._lama_exe),
+            *self._lama_command,
             "--model=lama",
             "--device=cuda",
             f"--port={port}",
@@ -477,3 +496,4 @@ class LamaCleanerManager:
         while self._instances:
             inst = self._instances.pop()
             self._stop_instance(inst)
+

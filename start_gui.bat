@@ -137,9 +137,7 @@ exit /b 0
 "%PYTHON_EXE%" -c "import importlib.metadata as m, importlib.util as u, sys; req=[('torch','2.10.0'),('torchvision','0.25.0'),('torchaudio','2.10.0'),('huggingface_hub','0.14.1'),('lama-cleaner',None)]; ok=(u.find_spec('lama_cleaner') is not None) and all(((m.version(p).startswith(v)) if v else True) for p,v in req); import torch; from huggingface_hub import cached_download; ok=ok and ((torch.version.cuda or '').startswith('12.8')); sys.exit(0 if ok else 1)" >nul 2>&1
 if errorlevel 1 exit /b 1
 
-if exist "%LOCAL_PY_DIR%\Scripts\lama-cleaner.exe" exit /b 0
-
-where lama-cleaner >nul 2>&1
+"%PYTHON_EXE%" -c "import sys; from lama_cleaner import entry_point; sys.argv=['lama-cleaner','--help']; entry_point()" >nul 2>&1
 if errorlevel 1 exit /b 1
 exit /b 0
 
@@ -151,16 +149,11 @@ if errorlevel 1 (
   exit /b 1
 )
 
-if exist "%LOCAL_PY_DIR%\Scripts\lama-cleaner.exe" (
-  "%LOCAL_PY_DIR%\Scripts\lama-cleaner.exe" --help >nul 2>&1
-) else (
-  lama-cleaner --help >nul 2>&1
-)
+"%PYTHON_EXE%" -c "import sys; from lama_cleaner import entry_point; sys.argv=['lama-cleaner','--help']; entry_point()" >nul 2>&1
 if errorlevel 1 (
-  echo lama-cleaner executable check failed.
+  echo lama-cleaner module command check failed.
   exit /b 1
 )
-
 echo lama-cleaner verification completed.
 exit /b 0
 
@@ -182,3 +175,4 @@ exit /b 0
 :setup_fail
 echo Setup failed.
 exit /b 1
+
