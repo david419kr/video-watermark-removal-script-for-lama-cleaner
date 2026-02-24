@@ -111,17 +111,17 @@ if not errorlevel 1 (
   exit /b 0
 )
 
-echo Installing CUDA torch packages...
-"%PYTHON_EXE%" -m pip install --no-cache-dir --force-reinstall torch==%TORCH_VERSION% torchvision==%TORCHVISION_VERSION% torchaudio==%TORCHAUDIO_VERSION% --index-url https://download.pytorch.org/whl/cu128
-if errorlevel 1 (
-  echo Failed to install torch CUDA packages.
-  exit /b 1
-)
-
 echo Installing lama-cleaner %LAMA_CLEANER_VERSION%...
 "%PYTHON_EXE%" -m pip install --no-cache-dir --force-reinstall lama-cleaner==%LAMA_CLEANER_VERSION%
 if errorlevel 1 (
   echo Failed to install lama-cleaner.
+  exit /b 1
+)
+
+echo Installing CUDA torch packages (final override to avoid CPU fallback)...
+"%PYTHON_EXE%" -m pip install --no-cache-dir --force-reinstall torch==%TORCH_VERSION% torchvision==%TORCHVISION_VERSION% torchaudio==%TORCHAUDIO_VERSION% --index-url https://download.pytorch.org/whl/cu128
+if errorlevel 1 (
+  echo Failed to install torch CUDA packages.
   exit /b 1
 )
 
@@ -195,3 +195,4 @@ exit /b 0
 :setup_fail
 echo Setup failed.
 exit /b 1
+
