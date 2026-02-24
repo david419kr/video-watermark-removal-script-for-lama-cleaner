@@ -268,6 +268,9 @@ class MainWindow(QMainWindow):
         self.installEventFilter(self)
         self.video_widget.installEventFilter(self)
         self.timeline_slider.installEventFilter(self)
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -636,7 +639,9 @@ class MainWindow(QMainWindow):
         self.video_widget = QVideoWidget()
         self.video_widget.setMinimumHeight(300)
         self.video_widget.setFocusPolicy(Qt.StrongFocus)
-        self.video_widget.setAcceptDrops(True)
+        # Keep drag/drop handling on MainWindow only.
+        # QVideoWidget can swallow drop events depending on backend/surface mode.
+        self.video_widget.setAcceptDrops(False)
 
         self.mask_state_badge = QLabel("NO SEGMENT (SKIP)", self.video_widget)
         self.mask_state_badge.setStyleSheet(
@@ -1858,7 +1863,26 @@ class MainWindow(QMainWindow):
         self._hide_drop_overlay()
         event.accept()
 
+    def _is_drag_event_for_this_window(self, watched) -> bool:  # noqa: ANN001
+        if watched is self:
+            return True
+        if watched in (self.video_widget, self.timeline_slider, self.drop_overlay):
+            return True
+        if isinstance(watched, QWidget):
+            return self.isAncestorOf(watched)
+        return False
+
     def eventFilter(self, watched, event):  # noqa: ANN001
+        if event.type() in (QEvent.DragEnter, QEvent.DragMove, QEvent.Drop, QEvent.DragLeave):
+            if self._is_drag_event_for_this_window(watched):
+                if event.type() in (QEvent.DragEnter, QEvent.DragMove):
+                    self._handle_drag_enter_or_move(event)
+                elif event.type() == QEvent.Drop:
+                    self._handle_drop(event)
+                else:
+                    self._handle_drag_leave(event)
+                return True
+
         if watched in (self.video_widget, self.timeline_slider):
             if event.type() == QEvent.MouseButtonPress:
                 watched.setFocus()
@@ -1866,18 +1890,6 @@ class MainWindow(QMainWindow):
                 self.mask_state_badge.move(12, 12)
                 self._current_mask_overlay_key = None
                 self._update_mask_overlay(self._frame_from_ms(self.player.position()))
-            if watched is self.video_widget and event.type() == QEvent.DragEnter:
-                self._handle_drag_enter_or_move(event)
-                return True
-            if watched is self.video_widget and event.type() == QEvent.DragMove:
-                self._handle_drag_enter_or_move(event)
-                return True
-            if watched is self.video_widget and event.type() == QEvent.DragLeave:
-                self._handle_drag_leave(event)
-                return True
-            if watched is self.video_widget and event.type() == QEvent.Drop:
-                self._handle_drop(event)
-                return True
 
         if event.type() == QEvent.KeyPress:
             if not self._is_video_seek_context():
@@ -1928,6 +1940,11 @@ class MainWindow(QMainWindow):
     def moveEvent(self, event) -> None:  # noqa: ANN001
         super().moveEvent(event)
         self._resize_overlays()
+
+    def leaveEvent(self, event) -> None:  # noqa: ANN001
+        super().leaveEvent(event)
+        if not QApplication.mouseButtons() and self._drop_overlay_visible:
+            self._hide_drop_overlay()
 
     def log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
