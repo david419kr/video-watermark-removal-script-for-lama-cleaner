@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 from .config import AppConfig, Paths
-from .lama_manager import LamaCleanerManager
+from .lama_manager import LamaCleanerManager, PortConflict
 from .mask_editor import MaskEditorDialog
 from .media_utils import (
     extract_reference_frame,
@@ -755,7 +755,11 @@ class MainWindow(QMainWindow):
 
     def _init_lama_manager(self) -> None:
         try:
-            self.lama_manager = LamaCleanerManager(paths=self.paths, log_fn=self.log)
+            self.lama_manager = LamaCleanerManager(
+                paths=self.paths,
+                log_fn=self.log,
+                conflict_resolver=self._resolve_lama_port_conflict,
+            )
         except Exception as exc:  # pylint: disable=broad-except
             self.log(f"Failed to initialize lama manager: {exc}")
             self._error(
@@ -764,6 +768,32 @@ class MainWindow(QMainWindow):
             )
             return
         self._auto_start_lama()
+
+    def _resolve_lama_port_conflict(self, conflict: PortConflict) -> bool:
+        message = (
+            f"Port {conflict.port} is already used by {conflict.process_name} "
+            f"(PID {conflict.pid}).\n\n"
+            "Terminate that process and start a new lama-cleaner instance?"
+        )
+        reply = QMessageBox.question(
+            self,
+            "Lama Cleaner Port Conflict",
+            message,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        accepted = reply == QMessageBox.Yes
+        if accepted:
+            self.log(
+                f"User approved terminating existing {conflict.process_name} "
+                f"(PID {conflict.pid}) on port {conflict.port}."
+            )
+        else:
+            self.log(
+                f"User declined terminating existing {conflict.process_name} "
+                f"(PID {conflict.pid}) on port {conflict.port}."
+            )
+        return accepted
 
     def _auto_start_lama(self) -> None:
         if self.lama_manager is None:
