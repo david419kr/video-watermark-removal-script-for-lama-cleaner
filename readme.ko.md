@@ -1,7 +1,5 @@
 # Lama Cleaner Video GUI (한국어)
 
-Release에서 받으세요: [GUI Release ZIP](https://github.com/david419kr/lama-cleaner-video-gui/releases/download/v0.1.0/gui-release-v0.1.0.zip)
-
 기존 CLI 스크립트 버전은 `legacy/cli-script` 브랜치에 보관되어 있습니다.
 
 `lama-cleaner`를 사용해 동영상 워터마크/오브젝트를 구간 단위로 제거하는 Windows 네이티브 GUI 앱입니다.
@@ -31,6 +29,7 @@ Release에서 받으세요: [GUI Release ZIP](https://github.com/david419kr/lama
 - Windows 10/11 (x64)
 - NVIDIA GPU + CUDA 사용 가능한 드라이버 (`--device=cuda` 사용)
 - 최초 설정 시 인터넷 연결 (Python/pip/패키지/모델 다운로드)
+- 일부 시스템에서는 Microsoft Visual C++ 재배포 패키지(x64)가 필요할 수 있습니다: [VC_redist.x64.exe](https://download.visualstudio.microsoft.com/download/pr/7ebf5fdb-36dc-4145-b0a0-90d3d5990a61/CC0FF0EB1DC3F5188AE6300FAEF32BF5BEEBA4BDD6E8E445A9184072096B713B/VC_redist.x64.exe)
 
 ## 빠른 시작
 
@@ -39,23 +38,6 @@ Release에서 받으세요: [GUI Release ZIP](https://github.com/david419kr/lama
 ```bat
 start_gui.bat
 ```
-
-### `start_gui.bat` 동작
-
-최초 실행(또는 런타임 누락 시) 자동으로 다음을 수행합니다.
-
-1. Embedded Python `3.10.11` 다운로드/압축해제 (`.runtime/python310`)
-2. Embedded Python의 `site-packages` 활성화
-3. `get-pip.py`로 `pip` 설치
-4. `requirements.txt` 기반 GUI 의존성 설치
-5. `lama-cleaner` 런타임 검증 또는 설치
-   - `torch==2.10.0`, `torchvision==0.25.0`, `torchaudio==2.10.0` (`cu128` 인덱스)
-   - `lama-cleaner`
-   - 호환성 고정을 위해 `huggingface_hub==0.14.1` 강제 핀
-6. `lama-cleaner` 실행 파일 검증
-7. Embedded Python으로 `main.py` 실행
-
-이미 환경이 유효하면 설치 단계는 자동으로 스킵됩니다.
 
 ## GUI 사용 순서
 
@@ -99,16 +81,6 @@ start_gui.bat
 - 인스턴스 설정값은 `workspace/ui_settings.json`에 저장
 - 앱 시작 시 설정 개수만큼 자동 기동, 종료 시 관리 중 인스턴스 정리
 
-## 성능 참고
-
-- 프레임 추출:
-  - CUDA 디코드 경로 우선
-  - 실패 시 CPU 경로 fallback
-- 프레임 머지:
-  - `h264_nvenc` 우선
-  - 실패 시 `libx264` fallback
-- 마스크 적용 프레임은 활성 `lama-cleaner` 포트들에 균등 분배되어 병렬 처리됩니다.
-
 ## 워크스페이스 구조
 
 - `workspace/jobs/job-*/input`: 추출 프레임
@@ -118,6 +90,23 @@ start_gui.bat
 - `workspace/lama_logs/`: `lama-cleaner` 시작/런타임 로그
 - `workspace/ui_settings.json`: UI 설정
 - `workspace/paused_job.json`: 일시정지/재개 메타데이터
+
+### `start_gui.bat` 동작
+
+최초 실행(또는 런타임 누락 시) 자동으로 다음을 수행합니다.
+
+1. Embedded Python `3.10.11` 다운로드/압축해제 (`.runtime/python310`)
+2. Embedded Python의 `site-packages` 활성화
+3. `get-pip.py`로 `pip` 설치
+4. `requirements.txt` 기반 GUI 의존성 설치
+5. `lama-cleaner` 런타임 검증 또는 설치
+   - `torch==2.10.0`, `torchvision==0.25.0`, `torchaudio==2.10.0` (`cu128` 인덱스)
+   - `lama-cleaner`
+   - 호환성 고정을 위해 `huggingface_hub==0.14.1` 강제 핀
+6. `lama-cleaner` 실행 파일 검증
+7. Embedded Python으로 `main.py` 실행
+
+이미 환경이 유효하면 설치 단계는 자동으로 스킵됩니다.
 
 ## 트러블슈팅
 
@@ -140,3 +129,4 @@ start_gui.bat
 2. `.runtime/` 삭제
 3. `workspace/` 삭제
 4. `start_gui.bat` 재실행
+

@@ -1,7 +1,6 @@
 # Lama Cleaner Video GUI
 
-[한국어 README 보기](readme.ko.md)  
-Get on Releases: [GUI Release ZIP](https://github.com/david419kr/lama-cleaner-video-gui/releases/download/v0.1.0/gui-release-v0.1.0.zip)
+[한국어 README 보기](readme.ko.md)
 
 Legacy CLI/script version is preserved in `legacy/cli-script`.
 
@@ -28,6 +27,7 @@ This repository is now GUI-first. Legacy batch/PowerShell pipeline flow is not u
 - Windows 10/11 (x64)
 - NVIDIA GPU + CUDA-capable driver (required for `--device=cuda`)
 - Internet access on first setup (Python/pip/packages/model download)
+- Microsoft Visual C++ Redistributable (x64) may be required on some systems: [VC_redist.x64.exe](https://download.visualstudio.microsoft.com/download/pr/7ebf5fdb-36dc-4145-b0a0-90d3d5990a61/CC0FF0EB1DC3F5188AE6300FAEF32BF5BEEBA4BDD6E8E445A9184072096B713B/VC_redist.x64.exe)
 
 ## Quick Start
 
@@ -36,23 +36,6 @@ From repo root:
 ```bat
 start_gui.bat
 ```
-
-### What `start_gui.bat` does
-
-On first run (or when runtime is missing), it bootstraps everything automatically:
-
-1. Downloads and extracts embedded Python `3.10.11` into `.runtime/python310`
-2. Enables `site-packages` in embedded Python
-3. Installs `pip` via `get-pip.py`
-4. Installs GUI requirements from `requirements.txt`
-5. Validates or installs `lama-cleaner` runtime:
-   - `torch==2.10.0`, `torchvision==0.25.0`, `torchaudio==2.10.0` from `cu128` index
-   - `lama-cleaner`
-   - force pins `huggingface_hub==0.14.1` for compatibility
-6. Verifies `lama-cleaner` command availability
-7. Launches `main.py` using embedded Python
-
-If runtime is already valid, installation is skipped.
 
 ## GUI Workflow
 
@@ -96,16 +79,6 @@ If runtime is already valid, installation is skipped.
 - Instance count preference is persisted in `workspace/ui_settings.json`
 - App auto-starts configured instances on launch and stops managed instances on exit
 
-## Performance Notes
-
-- Frame extraction:
-  - tries CUDA decode path first
-  - falls back to CPU if unavailable/fails
-- Frame merge:
-  - tries `h264_nvenc` first
-  - falls back to `libx264` if unavailable/fails
-- Masked frames are distributed across active `lama-cleaner` ports for parallel processing.
-
 ## Workspace Layout
 
 - `workspace/jobs/job-*/input` extracted frames
@@ -115,6 +88,23 @@ If runtime is already valid, installation is skipped.
 - `workspace/lama_logs/` `lama-cleaner` startup/runtime logs
 - `workspace/ui_settings.json` persisted UI preferences
 - `workspace/paused_job.json` paused/resumable job metadata
+
+### What `start_gui.bat` does
+
+On first run (or when runtime is missing), it bootstraps everything automatically:
+
+1. Downloads and extracts embedded Python `3.10.11` into `.runtime/python310`
+2. Enables `site-packages` in embedded Python
+3. Installs `pip` via `get-pip.py`
+4. Installs GUI requirements from `requirements.txt`
+5. Validates or installs `lama-cleaner` runtime:
+   - `torch==2.10.0`, `torchvision==0.25.0`, `torchaudio==2.10.0` from `cu128` index
+   - `lama-cleaner`
+   - force pins `huggingface_hub==0.14.1` for compatibility
+6. Verifies `lama-cleaner` command availability
+7. Launches `main.py` using embedded Python
+
+If runtime is already valid, installation is skipped.
 
 ## Troubleshooting
 
@@ -137,3 +127,4 @@ To fully reset local runtime and job state:
 2. Delete `.runtime/`
 3. Delete `workspace/`
 4. Run `start_gui.bat` again
+
