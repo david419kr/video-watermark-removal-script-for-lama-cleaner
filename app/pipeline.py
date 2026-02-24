@@ -126,7 +126,14 @@ class VideoProcessingPipeline:
 
         self._check_cancelled()
         merged_video = job_root / "video_cleaned.mp4"
-        self._merge_frames(output_dir, merged_video, video_info.fps)
+        self._merge_frames(
+            output_dir=output_dir,
+            merged_video=merged_video,
+            fps=video_info.fps,
+            encoder_backend=config.encoder_backend,
+            encoder_codec=config.encoder_codec,
+            encoder_quality=config.encoder_quality,
+        )
         self._check_cancelled()
 
         config.output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -344,37 +351,68 @@ class VideoProcessingPipeline:
 
         self.log(f"Worker {worker_id} finished on port {port}.")
 
-    def _merge_frames(self, output_dir: Path, merged_video: Path, fps: float) -> None:
-        self.log("Merging cleaned frames...")
+    def _merge_frames(
+        self,
+        output_dir: Path,
+        merged_video: Path,
+        fps: float,
+        encoder_backend: str,
+        encoder_codec: str,
+        encoder_quality: int,
+    ) -> None:
+        backend = (encoder_backend or "nvenc").strip().lower()
+        codec = (encoder_codec or "h264").strip().lower()
+        if backend not in {"cpu", "nvenc"}:
+            backend = "nvenc"
+        if codec not in {"h264", "hevc"}:
+            codec = "h264"
+        try:
+            quality_raw = int(encoder_quality)
+        except (TypeError, ValueError):
+            quality_raw = 7
+        quality = max(1, min(35, quality_raw))
+
+        cpu_encoder = "libx265" if codec == "hevc" else "libx264"
+        nvenc_encoder = "hevc_nvenc" if codec == "hevc" else "h264_nvenc"
+
+        self.log(
+            "Merging cleaned frames... "
+            f"(backend={backend}, codec={codec}, quality={quality})"
+        )
         input_pattern = output_dir / "%d.jpg"
         fps_text = f"{fps:.6f}"
 
-        if self._has_nvenc():
-            self.log("Frame merge: NVENC path.")
-            nvenc_cmd = [
-                str(self.paths.ffmpeg),
-                "-framerate",
-                fps_text,
-                "-i",
-                str(input_pattern),
-                "-c:v",
-                "h264_nvenc",
-                "-preset",
-                "p5",
-                "-rc",
-                "vbr",
-                "-cq",
-                "7",
-                "-b:v",
-                "0",
-                "-pix_fmt",
-                "yuv420p",
-                "-y",
-                str(merged_video),
-            ]
-            if self._run_command(nvenc_cmd, allow_fail=True):
-                return
-            self.log("NVENC merge failed. Falling back to libx264.")
+        if backend == "nvenc":
+            if self._has_encoder(nvenc_encoder):
+                self.log(f"Frame merge: NVENC path ({nvenc_encoder}).")
+                nvenc_cmd = [
+                    str(self.paths.ffmpeg),
+                    "-framerate",
+                    fps_text,
+                    "-i",
+                    str(input_pattern),
+                    "-c:v",
+                    nvenc_encoder,
+                    "-preset",
+                    "p5",
+                    "-rc",
+                    "vbr",
+                    "-cq",
+                    str(quality),
+                    "-b:v",
+                    "0",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-y",
+                    str(merged_video),
+                ]
+                if self._run_command(nvenc_cmd, allow_fail=True):
+                    return
+                self.log(f"{nvenc_encoder} merge failed. Falling back to {cpu_encoder}.")
+            else:
+                self.log(f"Requested encoder {nvenc_encoder} not available. Falling back to {cpu_encoder}.")
+        else:
+            self.log(f"Frame merge: CPU path requested ({cpu_encoder}).")
 
         cpu_cmd = [
             str(self.paths.ffmpeg),
@@ -383,9 +421,9 @@ class VideoProcessingPipeline:
             "-i",
             str(input_pattern),
             "-c:v",
-            "libx264",
+            cpu_encoder,
             "-crf",
-            "7",
+            str(quality),
             "-pix_fmt",
             "yuv420p",
             "-y",
@@ -468,7 +506,10 @@ class VideoProcessingPipeline:
         text = (result.stdout or "") + "\n" + (result.stderr or "")
         return "cuda" in text.lower()
 
-    def _has_nvenc(self) -> bool:
+    def _has_encoder(self, encoder_name: str) -> bool:
+        target = encoder_name.strip().lower()
+        if not target:
+            return False
         result = subprocess.run(
             [str(self.paths.ffmpeg), "-hide_banner", "-encoders"],
             capture_output=True,
@@ -478,7 +519,7 @@ class VideoProcessingPipeline:
             check=False,
         )
         text = (result.stdout or "") + "\n" + (result.stderr or "")
-        return "h264_nvenc" in text.lower()
+        return target in text.lower()
 
     def _validate_segments(self, segments: list[Segment], total_frames: int) -> None:
         ordered = sorted(segments, key=lambda seg: seg.start_frame)

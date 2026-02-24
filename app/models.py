@@ -36,4 +36,7 @@ class ProcessConfig:
     segments: list[Segment]
     lama_ports: list[int]
     keep_temp: bool = False
+    encoder_backend: str = "nvenc"
+    encoder_codec: str = "h264"
+    encoder_quality: int = 7
     resume_job_root: Optional[Path] = None

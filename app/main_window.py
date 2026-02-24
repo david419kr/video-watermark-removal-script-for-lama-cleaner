@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -44,6 +45,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QProgressBar,
+    QSlider,
     QSizePolicy,
     QSpinBox,
     QStyle,
@@ -383,20 +385,73 @@ class MainWindow(QMainWindow):
             return
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            value = int(data.get("instance_count", AppConfig.DEFAULT_INSTANCE_COUNT))
-            value = max(1, min(AppConfig.MAX_INSTANCE_COUNT, value))
-            self.instance_spin.setValue(value)
+            instance_value = int(data.get("instance_count", AppConfig.DEFAULT_INSTANCE_COUNT))
+            instance_value = max(1, min(AppConfig.MAX_INSTANCE_COUNT, instance_value))
+
+            encoder_backend = str(data.get("encoder_backend", "nvenc")).strip().lower()
+            if encoder_backend not in {"cpu", "nvenc"}:
+                encoder_backend = "nvenc"
+
+            encoder_codec = str(data.get("encoder_codec", "h264")).strip().lower()
+            if encoder_codec not in {"h264", "hevc"}:
+                encoder_codec = "h264"
+
+            try:
+                encoder_quality = int(data.get("encoder_quality", 7))
+            except (TypeError, ValueError):
+                encoder_quality = 7
+            encoder_quality = max(1, min(35, encoder_quality))
+
+            self.instance_spin.blockSignals(True)
+            self.encoder_backend_combo.blockSignals(True)
+            self.encoder_codec_combo.blockSignals(True)
+            self.encoder_quality_slider.blockSignals(True)
+            self.instance_spin.setValue(instance_value)
+            self._set_combo_data(self.encoder_backend_combo, encoder_backend)
+            self._set_combo_data(self.encoder_codec_combo, encoder_codec)
+            self.encoder_quality_slider.setValue(encoder_quality)
+            self.instance_spin.blockSignals(False)
+            self.encoder_backend_combo.blockSignals(False)
+            self.encoder_codec_combo.blockSignals(False)
+            self.encoder_quality_slider.blockSignals(False)
+            self._update_quality_value_label(encoder_quality)
         except Exception as exc:  # pylint: disable=broad-except
             self.log(f"Failed to load UI settings: {exc}")
 
     def _save_ui_settings(self) -> None:
         path = self._settings_path()
-        payload = {"instance_count": int(self.instance_spin.value())}
+        payload = {
+            "instance_count": int(self.instance_spin.value()),
+            "encoder_backend": self._encoder_backend_value(),
+            "encoder_codec": self._encoder_codec_value(),
+            "encoder_quality": self._encoder_quality_value(),
+        }
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
         except Exception as exc:  # pylint: disable=broad-except
             self.log(f"Failed to save UI settings: {exc}")
+
+    @staticmethod
+    def _set_combo_data(combo: QComboBox, value: str) -> None:
+        index = combo.findData(value)
+        if index < 0:
+            index = 0
+        combo.setCurrentIndex(index)
+
+    def _encoder_backend_value(self) -> str:
+        value = self.encoder_backend_combo.currentData()
+        return str(value if value is not None else "nvenc")
+
+    def _encoder_codec_value(self) -> str:
+        value = self.encoder_codec_combo.currentData()
+        return str(value if value is not None else "h264")
+
+    def _encoder_quality_value(self) -> int:
+        return int(self.encoder_quality_slider.value())
+
+    def _update_quality_value_label(self, value: int) -> None:
+        self.encoder_quality_value_label.setText(str(int(value)))
 
     def _paused_state_path(self) -> Path:
         return self.paths.paused_job_state
@@ -431,6 +486,9 @@ class MainWindow(QMainWindow):
             "video_path": str(config.video_path),
             "output_path": str(config.output_path),
             "keep_temp": bool(config.keep_temp),
+            "encoder_backend": config.encoder_backend,
+            "encoder_codec": config.encoder_codec,
+            "encoder_quality": int(config.encoder_quality),
             "segments": [self._segment_to_dict(seg) for seg in config.segments],
         }
         path = self._paused_state_path()
@@ -476,6 +534,17 @@ class MainWindow(QMainWindow):
             video_path = Path(payload["video_path"])
             output_path = Path(payload["output_path"])
             keep_temp = bool(payload.get("keep_temp", False))
+            encoder_backend = str(payload.get("encoder_backend", self._encoder_backend_value())).strip().lower()
+            if encoder_backend not in {"cpu", "nvenc"}:
+                encoder_backend = "nvenc"
+            encoder_codec = str(payload.get("encoder_codec", self._encoder_codec_value())).strip().lower()
+            if encoder_codec not in {"h264", "hevc"}:
+                encoder_codec = "h264"
+            try:
+                encoder_quality = int(payload.get("encoder_quality", self._encoder_quality_value()))
+            except (TypeError, ValueError):
+                encoder_quality = self._encoder_quality_value()
+            encoder_quality = max(1, min(35, encoder_quality))
             segments_payload = payload.get("segments", [])
             segments = [self._segment_from_dict(item) for item in segments_payload]
         except Exception as exc:  # pylint: disable=broad-except
@@ -496,11 +565,18 @@ class MainWindow(QMainWindow):
             segments=segments,
             lama_ports=[],
             keep_temp=keep_temp,
+            encoder_backend=encoder_backend,
+            encoder_codec=encoder_codec,
+            encoder_quality=encoder_quality,
             resume_job_root=job_root,
         )
         self.segments = list(segments)
         self.output_path_edit.setText(str(output_path))
         self.keep_temp_box.setChecked(keep_temp)
+        self._set_combo_data(self.encoder_backend_combo, encoder_backend)
+        self._set_combo_data(self.encoder_codec_combo, encoder_codec)
+        self.encoder_quality_slider.setValue(encoder_quality)
+        self._update_quality_value_label(encoder_quality)
         self._load_video_file(video_path, keep_paused_state=True)
         self._refresh_segment_table()
         self.progress_bar.setValue(self._estimate_paused_progress(job_root))
@@ -696,6 +772,42 @@ class MainWindow(QMainWindow):
         box = QGroupBox("Run")
         layout = QFormLayout()
 
+        encoding_row = QHBoxLayout()
+        self.encoder_backend_combo = QComboBox()
+        self.encoder_backend_combo.addItem("NVENC", "nvenc")
+        self.encoder_backend_combo.addItem("CPU", "cpu")
+        self.encoder_backend_combo.currentIndexChanged.connect(lambda _: self._save_ui_settings())
+
+        self.encoder_codec_combo = QComboBox()
+        self.encoder_codec_combo.addItem("H.264", "h264")
+        self.encoder_codec_combo.addItem("HEVC", "hevc")
+        self.encoder_codec_combo.currentIndexChanged.connect(lambda _: self._save_ui_settings())
+
+        self.encoder_quality_slider = QSlider(Qt.Horizontal)
+        self.encoder_quality_slider.setMinimum(1)
+        self.encoder_quality_slider.setMaximum(35)
+        self.encoder_quality_slider.setValue(7)
+        self.encoder_quality_slider.setSingleStep(1)
+        self.encoder_quality_slider.setPageStep(2)
+        self.encoder_quality_slider.valueChanged.connect(self._on_encoder_quality_changed)
+
+        self.encoder_quality_value_label = QLabel("7")
+        self.encoder_quality_value_label.setMinimumWidth(24)
+        self.encoder_quality_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        quality_hint = QLabel("(lower = better quality)")
+        quality_hint.setStyleSheet("color: #c0c0c0;")
+
+        encoding_row.addWidget(QLabel("Backend"))
+        encoding_row.addWidget(self.encoder_backend_combo)
+        encoding_row.addSpacing(8)
+        encoding_row.addWidget(QLabel("Codec"))
+        encoding_row.addWidget(self.encoder_codec_combo)
+        encoding_row.addSpacing(8)
+        encoding_row.addWidget(QLabel("Quality"))
+        encoding_row.addWidget(self.encoder_quality_slider, 1)
+        encoding_row.addWidget(self.encoder_quality_value_label)
+        encoding_row.addWidget(quality_hint)
+
         row = QHBoxLayout()
         self.keep_temp_box = QCheckBox("Keep temporary job folder")
         self.start_btn = QPushButton("Start Processing")
@@ -724,10 +836,15 @@ class MainWindow(QMainWindow):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
 
+        layout.addRow(QLabel("Encoding"), encoding_row)
         layout.addRow(row)
         layout.addRow(QLabel("Progress"), self.progress_bar)
         box.setLayout(layout)
         return box
+
+    def _on_encoder_quality_changed(self, value: int) -> None:
+        self._update_quality_value_label(value)
+        self._save_ui_settings()
 
     def _build_log_group(self) -> QGroupBox:
         box = QGroupBox("Logs")
@@ -1401,6 +1518,9 @@ class MainWindow(QMainWindow):
             segments=list(self.segments),
             lama_ports=ports,
             keep_temp=self.keep_temp_box.isChecked(),
+            encoder_backend=self._encoder_backend_value(),
+            encoder_codec=self._encoder_codec_value(),
+            encoder_quality=self._encoder_quality_value(),
             resume_job_root=None,
         )
 
@@ -1424,6 +1544,9 @@ class MainWindow(QMainWindow):
             segments=list(self._paused_process_config.segments),
             lama_ports=ports,
             keep_temp=self._paused_process_config.keep_temp,
+            encoder_backend=self._paused_process_config.encoder_backend,
+            encoder_codec=self._paused_process_config.encoder_codec,
+            encoder_quality=self._paused_process_config.encoder_quality,
             resume_job_root=self._paused_process_config.resume_job_root,
         )
         self._launch_processing_worker(config, f"Resuming paused job: {config.resume_job_root}")
@@ -1500,6 +1623,9 @@ class MainWindow(QMainWindow):
                     segments=list(self._active_process_config.segments),
                     lama_ports=[],
                     keep_temp=self._active_process_config.keep_temp,
+                    encoder_backend=self._active_process_config.encoder_backend,
+                    encoder_codec=self._active_process_config.encoder_codec,
+                    encoder_quality=self._active_process_config.encoder_quality,
                     resume_job_root=Path(job_root),
                 )
                 self._paused_process_config = paused_cfg
@@ -1523,6 +1649,9 @@ class MainWindow(QMainWindow):
         self.start_btn.setText("Pause Processing" if running else ("Resume Processing" if self._paused_process_config else "Start Processing"))
         self.cancel_btn.setEnabled(running)
         self.instance_spin.setEnabled(not running)
+        self.encoder_backend_combo.setEnabled(not running)
+        self.encoder_codec_combo.setEnabled(not running)
+        self.encoder_quality_slider.setEnabled(not running)
         self.add_segment_btn.setEnabled(not running)
         self.segment_table.setEnabled(not running)
         if not running:
